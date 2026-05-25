@@ -1,0 +1,27 @@
+{
+  "name": "pos-functions",
+  "private": true,
+  "engines": {
+    "node": "20"
+  },
+  "main": "lib/index.js",
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc --watch",
+    "serve": "npm run build && firebase emulators:start --only functions",
+    "shell": "npm run build && firebase functions:shell",
+    "start": "npm run shell",
+    "deploy": "firebase deploy --only functions",
+    "logs": "firebase functions:log",
+    "seed:super-admin": "node scripts/seed-super-admin.mjs",
+    "grant:public": "node scripts/grant-public-invoker.mjs"
+  },
+  "dependencies": {
+    "firebase-admin": "^12.5.0",
+    "firebase-functions": "^5.1.0",
+    "stripe": "^17.7.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.4"
+  }
+}

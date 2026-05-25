@@ -1,0 +1,58 @@
+{
+  "rules": {
+    "users": {
+      ".read": "auth != null && auth.token.role == 'super_admin'",
+      "$uid": {
+        ".read": "auth != null && (auth.uid == $uid || auth.token.role == 'super_admin')",
+        ".write": "auth != null && auth.token.role == 'super_admin'"
+      }
+    },
+
+    "companies": {
+      ".read": "auth != null && auth.token.role == 'super_admin'",
+      "$companyId": {
+        ".read": "auth != null",
+        ".write": "auth != null && auth.token.role == 'super_admin'",
+        ".validate": "newData.hasChildren(['name', 'adminUid', 'createdAt'])"
+      }
+    },
+
+    "menu": {
+      "$companyId": {
+        ".read": true,
+        ".write": "auth != null && (auth.token.role == 'super_admin' || (auth.token.role == 'admin' && auth.token.companyId == $companyId))",
+
+        "categories": {
+          "$catId": {
+            ".validate": "newData.hasChildren(['name'])"
+          }
+        },
+        "items": {
+          "$itemId": {
+            ".validate": "newData.hasChildren(['name', 'categoryId', 'basePrice'])"
+          }
+        },
+        "modifierGroups": {
+          "$groupId": {
+            ".validate": "newData.hasChildren(['name'])"
+          }
+        }
+      }
+    },
+
+    "orders": {
+      "$companyId": {
+        ".read": "auth != null && (auth.token.role == 'super_admin' || (auth.token.role == 'admin' && auth.token.companyId == $companyId))",
+        ".write": "auth != null && (auth.token.role == 'super_admin' || (auth.token.role == 'admin' && auth.token.companyId == $companyId))",
+        ".indexOn": ["createdAt", "status", "stripePaymentIntentId"]
+      }
+    },
+
+    "counters": {
+      "$companyId": {
+        ".read": "auth != null && (auth.token.role == 'super_admin' || (auth.token.role == 'admin' && auth.token.companyId == $companyId))",
+        ".write": "auth != null && (auth.token.role == 'super_admin' || (auth.token.role == 'admin' && auth.token.companyId == $companyId))"
+      }
+    }
+  }
+}

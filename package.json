@@ -1,0 +1,47 @@
+{
+  "name": "pos-mvp",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
+    "emulators": "firebase emulators:start",
+    "emulators:functions": "npm --prefix functions run build && firebase emulators:start --only auth,database,storage,functions",
+    "emulators:core": "firebase emulators:start --only auth,database",
+    "seed:super-admin": "npm --prefix functions run seed:super-admin",
+    "grant:public": "npm --prefix functions run grant:public",
+    "deploy:rules": "firebase deploy --only database,storage",
+    "deploy:functions": "firebase deploy --only functions",
+    "deploy": "npm run build && firebase deploy"
+  },
+  "dependencies": {
+    "@hookform/resolvers": "^3.9.0",
+    "clsx": "^2.1.1",
+    "firebase": "^10.13.2",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-hook-form": "^7.53.0",
+    "react-hot-toast": "^2.4.1",
+    "react-router-dom": "^6.26.2",
+    "zod": "^3.23.8",
+    "zustand": "^4.5.5"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.5",
+    "@types/react-dom": "^18.3.0",
+    "@typescript-eslint/eslint-plugin": "^8.4.0",
+    "@typescript-eslint/parser": "^8.4.0",
+    "@vitejs/plugin-react": "^4.3.1",
+    "autoprefixer": "^10.4.20",
+    "eslint": "^8.57.0",
+    "eslint-plugin-react-hooks": "^4.6.2",
+    "eslint-plugin-react-refresh": "^0.4.11",
+    "postcss": "^8.4.45",
+    "tailwindcss": "^3.4.10",
+    "typescript": "^5.5.4",
+    "vite": "^5.4.3"
+  }
+}
