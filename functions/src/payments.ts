@@ -347,8 +347,8 @@ export const createKioskPaymentIntent = onCall<
 
 interface CreateOrderInput {
   companyId: string
-  paymentIntentId: string
-  paymentMethod: 'card_reader' | 'tap_to_pay'
+  paymentIntentId?: string
+  paymentMethod: 'card_reader' | 'tap_to_pay' | 'cash'
   lines: KioskLineInput[]
   tableNumber?: string
   tipAmount?: number
@@ -377,10 +377,16 @@ export const createKioskOrder = onCall<
     idempotencyKey,
   } = req.data || ({} as CreateOrderInput)
 
-  if (!paymentIntentId || typeof paymentIntentId !== 'string') {
+  const isCash = paymentMethod === 'cash'
+
+  if (!isCash && (!paymentIntentId || typeof paymentIntentId !== 'string')) {
     throw new HttpsError('invalid-argument', 'paymentIntentId required.')
   }
-  if (paymentMethod !== 'card_reader' && paymentMethod !== 'tap_to_pay') {
+  if (
+    paymentMethod !== 'card_reader' &&
+    paymentMethod !== 'tap_to_pay' &&
+    paymentMethod !== 'cash'
+  ) {
     throw new HttpsError('invalid-argument', 'paymentMethod invalid.')
   }
   if (!idempotencyKey || typeof idempotencyKey !== 'string') {
@@ -397,10 +403,11 @@ export const createKioskOrder = onCall<
     const taxRate = Number(company.taxRate) > 0 ? Number(company.taxRate) : 0
     const tip = round2(Math.max(0, Number(tipAmount) || 0))
 
+    const dedupeKey = isCash ? idempotencyKey : paymentIntentId
     const existingSnap = await db
       .ref(`orders/${companyId}`)
-      .orderByChild('stripePaymentIntentId')
-      .equalTo(paymentIntentId)
+      .orderByChild(isCash ? 'kioskIdempotencyKey' : 'stripePaymentIntentId')
+      .equalTo(dedupeKey as string)
       .limitToFirst(1)
       .get()
     const existing = existingSnap.val() as Record<string, OrderRecord> | null
@@ -419,26 +426,28 @@ export const createKioskOrder = onCall<
     const total = round2(subtotal + tax + tip)
     const totalInCents = Math.round(total * 100)
 
-    const stripe = stripeClient()
-    const intent = await stripe.paymentIntents.retrieve(paymentIntentId)
+    if (!isCash) {
+      const stripe = stripeClient()
+      const intent = await stripe.paymentIntents.retrieve(paymentIntentId as string)
 
-    if (intent.metadata?.companyId && intent.metadata.companyId !== companyId) {
-      throw new HttpsError(
-        'permission-denied',
-        'PaymentIntent does not belong to this company.',
-      )
-    }
-    if (intent.status !== 'succeeded') {
-      throw new HttpsError(
-        'failed-precondition',
-        `PaymentIntent status is ${intent.status}, refusing to create order.`,
-      )
-    }
-    if (intent.amount !== totalInCents) {
-      throw new HttpsError(
-        'failed-precondition',
-        `Amount mismatch: charged ${intent.amount}, order total ${totalInCents}.`,
-      )
+      if (intent.metadata?.companyId && intent.metadata.companyId !== companyId) {
+        throw new HttpsError(
+          'permission-denied',
+          'PaymentIntent does not belong to this company.',
+        )
+      }
+      if (intent.status !== 'succeeded') {
+        throw new HttpsError(
+          'failed-precondition',
+          `PaymentIntent status is ${intent.status}, refusing to create order.`,
+        )
+      }
+      if (intent.amount !== totalInCents) {
+        throw new HttpsError(
+          'failed-precondition',
+          `Amount mismatch: charged ${intent.amount}, order total ${totalInCents}.`,
+        )
+      }
     }
 
     const counterRef = db.ref(`counters/${companyId}/orderSeq`)
@@ -474,15 +483,16 @@ export const createKioskOrder = onCall<
       tip,
       total,
       paymentMethod,
-      paymentStatus: 'paid',
-      status: 'completed',
+      paymentStatus: isCash ? 'pending' : 'paid',
+      status: isCash ? 'pending' : 'completed',
       cashReceived: 0,
       change: 0,
       createdBy: req.auth?.uid ?? 'kiosk',
       createdByName: 'Kiosk',
       createdAt: now,
       orderSource: 'kiosk',
-      stripePaymentIntentId: paymentIntentId,
+      ...(isCash ? { kioskIdempotencyKey: idempotencyKey } : {}),
+      ...(isCash ? {} : { stripePaymentIntentId: paymentIntentId }),
       kds: { status: 'queued', queuedAt: now },
       ...(tableNumber ? { tableNumber: String(tableNumber).slice(0, 16) } : {}),
     }
@@ -530,5 +540,6 @@ interface OrderRecord {
   tableNumber?: string
   orderSource?: 'pos' | 'kiosk'
   stripePaymentIntentId?: string
+  kioskIdempotencyKey?: string
   kds?: { status: 'queued' | 'in_progress' | 'ready' | 'served'; queuedAt: number }
 }

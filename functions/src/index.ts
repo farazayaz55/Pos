@@ -220,4 +220,5 @@ export {
   getTerminalConnectionToken,
   createKioskPaymentIntent,
   createKioskOrder,
+  getKioskOrder,
 } from './payments'

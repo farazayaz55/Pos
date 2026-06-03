@@ -156,3 +156,15 @@ export const updateOrderStatus = async (
   if (status === 'completed') patch.completedAt = Date.now()
   await update(orderRef(companyId, orderId), patch)
 }
+
+export const completeKioskCashOrder = async (
+  companyId: string,
+  orderId: string,
+) => {
+  const patch: Record<string, unknown> = {
+    status: 'completed',
+    paymentStatus: 'paid',
+    completedAt: Date.now(),
+  }
+  await update(orderRef(companyId, orderId), patch)
+}

@@ -44,7 +44,12 @@
       "$companyId": {
         ".read": "auth != null && (auth.token.role == 'super_admin' || (auth.token.role == 'admin' && auth.token.companyId == $companyId))",
         ".write": "auth != null && (auth.token.role == 'super_admin' || (auth.token.role == 'admin' && auth.token.companyId == $companyId))",
-        ".indexOn": ["createdAt", "status", "stripePaymentIntentId"]
+        ".indexOn": [
+          "createdAt",
+          "status",
+          "stripePaymentIntentId",
+          "kioskIdempotencyKey"
+        ]
       }
     },
 

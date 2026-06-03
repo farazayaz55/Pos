@@ -159,16 +159,29 @@ const ReceiptPage = () => {
             <span>{formatMoney(order.total)}</span>
           </div>
           {order.paymentMethod === 'cash' ? (
-            <>
-              <div className="flex justify-between">
-                <span>Cash</span>
-                <span>{formatMoney(order.cashReceived ?? 0)}</span>
-              </div>
-              <div className="flex justify-between font-bold">
-                <span>Change</span>
-                <span>{formatMoney(order.change ?? 0)}</span>
-              </div>
-            </>
+            order.paymentStatus === 'pending' ? (
+              <>
+                <div className="flex justify-between">
+                  <span>Cash due</span>
+                  <span>{formatMoney(order.total)}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span>Status</span>
+                  <span className="uppercase">Pending</span>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="flex justify-between">
+                  <span>Cash</span>
+                  <span>{formatMoney(order.cashReceived ?? 0)}</span>
+                </div>
+                <div className="flex justify-between font-bold">
+                  <span>Change</span>
+                  <span>{formatMoney(order.change ?? 0)}</span>
+                </div>
+              </>
+            )
           ) : (
             <div className="flex justify-between">
               <span>Paid</span>
@@ -181,7 +194,9 @@ const ReceiptPage = () => {
         <p className="text-center text-[11px]">Thank you!</p>
         <p className="text-center text-[10px] text-slate-500">
           {order.paymentMethod === 'cash'
-            ? 'Paid in cash'
+            ? order.paymentStatus === 'pending'
+              ? 'Payment pending'
+              : 'Paid in cash'
             : order.orderSource === 'kiosk'
               ? 'Self-service kiosk order'
               : 'Paid by card'}

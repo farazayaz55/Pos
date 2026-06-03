@@ -1,7 +1,9 @@
 import { useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
+import toast from 'react-hot-toast'
 import { useCompanyContextStore } from '@/stores/companyContextStore'
 import { useOrders } from '@/hooks/useOrders'
+import { completeKioskCashOrder } from '@/services/orders'
 import { formatMoney } from '@/utils/currency'
 import LoadingScreen from '@/components/common/LoadingScreen'
 import type { Order } from '@/types'
@@ -30,6 +32,7 @@ const OrderHistoryPage = () => {
   const [search, setSearch] = useState('')
   const [dateFilter, setDateFilter] = useState<DateFilter>('today')
   const [selected, setSelected] = useState<Order | null>(null)
+  const [updating, setUpdating] = useState(false)
 
   const filtered = useMemo(() => {
     const now = Date.now()
@@ -61,11 +64,26 @@ const OrderHistoryPage = () => {
 
   if (loading) return <LoadingScreen label="Loading orders..." />
 
+  const handleMarkPaid = async (order: Order) => {
+    if (!companyId) return
+    setUpdating(true)
+    try {
+      await completeKioskCashOrder(companyId, order.id)
+      toast.success(`Order #${order.orderNumber} completed`)
+      setSelected(null)
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'Failed to update order'
+      toast.error(msg)
+    } finally {
+      setUpdating(false)
+    }
+  }
+
   return (
     <div className="p-6">
       <div className="mb-6">
         <h1 className="text-2xl font-bold text-slate-900">Orders</h1>
-        <p className="text-sm text-slate-500">All completed cash orders.</p>
+        <p className="text-sm text-slate-500">All orders including kiosk cash.</p>
       </div>
 
       <div className="mb-4 grid grid-cols-1 gap-3 sm:grid-cols-3">
@@ -166,7 +184,12 @@ const OrderHistoryPage = () => {
       )}
 
       {selected && (
-        <OrderDetailDrawer order={selected} onClose={() => setSelected(null)} />
+        <OrderDetailDrawer
+          order={selected}
+          onClose={() => setSelected(null)}
+          onMarkPaid={() => handleMarkPaid(selected)}
+          updating={updating}
+        />
       )}
     </div>
   )
@@ -179,7 +202,17 @@ const StatCard = ({ label, value }: { label: string; value: string }) => (
   </div>
 )
 
-const OrderDetailDrawer = ({ order, onClose }: { order: Order; onClose: () => void }) => (
+const OrderDetailDrawer = ({
+  order,
+  onClose,
+  onMarkPaid,
+  updating,
+}: {
+  order: Order
+  onClose: () => void
+  onMarkPaid: () => void
+  updating: boolean
+}) => (
   <div className="fixed inset-0 z-40 flex justify-end bg-slate-900/50">
     <div className="flex w-full max-w-md flex-col bg-white">
       <div className="flex items-center justify-between border-b border-slate-200 p-4">
@@ -212,6 +245,12 @@ const OrderDetailDrawer = ({ order, onClose }: { order: Order; onClose: () => vo
           <div>
             <p className="text-slate-500">Status</p>
             <p className="font-medium">{order.status}</p>
+          </div>
+          <div>
+            <p className="text-slate-500">Payment</p>
+            <p className="font-medium">
+              {order.paymentStatus} ({order.paymentMethod.replace('_', ' ')})
+            </p>
           </div>
         </div>
 
@@ -284,13 +323,26 @@ const OrderDetailDrawer = ({ order, onClose }: { order: Order; onClose: () => vo
         )}
       </div>
       <div className="border-t border-slate-200 p-4">
-        <Link
-          to={`/admin/receipt/${order.id}`}
-          className="btn-primary w-full"
-          onClick={onClose}
-        >
-          Open Receipt
-        </Link>
+        {order.orderSource === 'kiosk' &&
+        order.paymentMethod === 'cash' &&
+        order.paymentStatus === 'pending' &&
+        order.status === 'pending' ? (
+          <button
+            onClick={onMarkPaid}
+            className="btn-primary w-full"
+            disabled={updating}
+          >
+            {updating ? 'Completing...' : 'Mark Paid & Complete'}
+          </button>
+        ) : (
+          <Link
+            to={`/admin/receipt/${order.id}`}
+            className="btn-primary w-full"
+            onClick={onClose}
+          >
+            Open Receipt
+          </Link>
+        )}
       </div>
     </div>
   </div>

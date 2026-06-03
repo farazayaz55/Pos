@@ -11,6 +11,9 @@
 //   npm run grant:public
 
 import { GoogleAuth } from 'google-auth-library'
+import fs from 'node:fs'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 const PROJECT_ID = process.env.SEED_PROJECT_ID || 'servr-7d3f7'
 const REGION = process.env.SEED_REGION || 'us-central1'
@@ -25,9 +28,27 @@ const FUNCTIONS = [
   'getTerminalConnectionToken',
   'createKioskPaymentIntent',
   'createKioskOrder',
+  'getKioskOrder',
 ].map((n) => n.toLowerCase())
 
+const __dirname = path.dirname(fileURLToPath(import.meta.url))
+const DEFAULT_KEY_PATH = path.resolve(
+  __dirname,
+  '../../../servr-7d3f7-firebase-adminsdk-fbsvc-28d5525432.json',
+)
+const KEY_PATH =
+  process.env.GOOGLE_APPLICATION_CREDENTIALS || DEFAULT_KEY_PATH
+
+if (!fs.existsSync(KEY_PATH)) {
+  console.error(
+    'Service account key not found. Set GOOGLE_APPLICATION_CREDENTIALS or place the key at:',
+    DEFAULT_KEY_PATH,
+  )
+  process.exit(1)
+}
+
 const auth = new GoogleAuth({
+  keyFile: KEY_PATH,
   scopes: ['https://www.googleapis.com/auth/cloud-platform'],
 })
 
