@@ -115,9 +115,9 @@ const ReceiptPage = () => {
                   <div className="font-semibold">
                     {it.quantity} x {it.itemName}
                   </div>
-                  {it.modifiers.length > 0 && (
+                  {(it.modifiers?.length ?? 0) > 0 && (
                     <ul className="pl-3 text-[11px] text-slate-600">
-                      {it.modifiers.map((m, idx) => (
+                      {(it.modifiers ?? []).map((m, idx) => (
                         <li key={idx}>
                           + {m.optionName}
                           {m.priceAdjustment !== 0 &&

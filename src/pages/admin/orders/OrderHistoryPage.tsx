@@ -265,9 +265,9 @@ const OrderDetailDrawer = ({
                   </span>
                   <span className="font-bold">{formatMoney(it.lineTotal)}</span>
                 </div>
-                {it.modifiers.length > 0 && (
+                {(it.modifiers?.length ?? 0) > 0 && (
                   <ul className="mt-1 pl-3 text-xs text-slate-500">
-                    {it.modifiers.map((m, idx) => (
+                    {(it.modifiers ?? []).map((m, idx) => (
                       <li key={idx}>+ {m.optionName}</li>
                     ))}
                   </ul>
