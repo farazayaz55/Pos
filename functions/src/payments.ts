@@ -21,6 +21,9 @@
  *    bypasses RTDB rules — kiosk anonymous auth is intentionally NOT
  *    allowed to write orders directly).
  *
+ *  - getKioskOrder: lets authenticated kiosk clients read an order by id
+ *    (RTDB rules deny direct order reads for anonymous kiosk auth).
+ *
  *  Idempotency: callers MUST send an idempotencyKey. Both createKioskPaymentIntent
  *  and createKioskOrder are idempotent on (paymentIntentId or idempotencyKey)
  *  so a flaky network never produces a double charge or a duplicate order.
@@ -518,6 +521,57 @@ export const createKioskOrder = onCall<
     throw new HttpsError('internal', `createKioskOrder failed: ${msg}`)
   }
 })
+
+interface GetKioskOrderInput {
+  companyId: string
+  orderId: string
+}
+
+interface GetKioskOrderResult {
+  orderId: string
+  orderNumber: number
+  total: number
+  paymentMethod: 'cash' | 'card_reader' | 'tap_to_pay'
+  paymentStatus: 'pending' | 'paid'
+  status: 'pending' | 'completed' | 'cancelled'
+  items: unknown[]
+  subtotal: number
+  tax?: number
+  tip?: number
+  createdAt: number
+}
+
+export const getKioskOrder = onCall<GetKioskOrderInput, Promise<GetKioskOrderResult>>(
+  async (req) => {
+    requireAuth(req)
+    const { companyId, orderId } = req.data || ({} as GetKioskOrderInput)
+    if (!companyId || !orderId) {
+      throw new HttpsError('invalid-argument', 'companyId and orderId are required.')
+    }
+
+    await assertCompanyActive(companyId)
+
+    const snap = await db.ref(`orders/${companyId}/${orderId}`).get()
+    const order = snap.val() as OrderRecord | null
+    if (!order) {
+      throw new HttpsError('not-found', 'Order not found.')
+    }
+
+    return {
+      orderId,
+      orderNumber: order.orderNumber,
+      total: order.total,
+      paymentMethod: order.paymentMethod,
+      paymentStatus: order.paymentStatus,
+      status: order.status,
+      items: order.items,
+      subtotal: order.subtotal,
+      tax: order.tax,
+      tip: order.tip,
+      createdAt: order.createdAt,
+    }
+  },
+)
 
 interface OrderRecord {
   orderNumber: number
