@@ -1,4 +1,14 @@
-export type UserRole = 'super_admin' | 'admin'
+export type UserRole = 'super_admin' | 'admin' | 'staff'
+
+export type StaffPermission = 'pos' | 'menu' | 'orders' | 'settings' | 'team'
+
+export interface StaffPermissions {
+  pos: boolean
+  menu: boolean
+  orders: boolean
+  settings: boolean
+  team: boolean
+}
 
 export interface AppUser {
   uid: string
@@ -6,7 +16,21 @@ export interface AppUser {
   name: string
   role: UserRole
   companyId?: string
+  password?: string
+  permissions?: StaffPermissions
+  active?: boolean
   createdAt: number
+}
+
+/** Denormalized roster entry under companies/{companyId}/team/{uid} */
+export interface TeamMember {
+  uid: string
+  name: string
+  email: string
+  role: 'admin' | 'staff'
+  permissions?: StaffPermissions
+  createdAt: number
+  active: boolean
 }
 
 export interface Company {
@@ -99,10 +123,40 @@ export interface DiscountInfo {
   at?: number
 }
 
+/** When a tax component applies relative to the post-discount taxable base. */
+export type TaxConditionType = 'always' | 'taxableBaseLte' | 'taxableBaseGt'
+
+export interface TaxComponent {
+  id: string
+  name: string
+  /** Decimal rate, e.g. 0.13 for 13%. */
+  rate: number
+  conditionType: TaxConditionType
+  /** Required when conditionType is taxableBaseLte or taxableBaseGt. */
+  conditionAmount?: number
+  active: boolean
+  sortOrder: number
+}
+
+export interface CompanyTaxSettings {
+  companyId: string
+  components: Record<string, TaxComponent>
+  updatedAt?: number
+  updatedBy?: string
+}
+
+export interface OrderTaxLine {
+  name: string
+  rate: number
+  amount: number
+}
+
 export type OrderStatus = 'pending' | 'completed' | 'cancelled'
-export type PaymentStatus = 'pending' | 'paid'
+export type PaymentStatus = 'pending' | 'paid' | 'refunded'
 export type PaymentMethod = 'cash' | 'card_reader' | 'tap_to_pay'
 export type OrderSource = 'pos' | 'kiosk'
+/** Client-only outbox state; never persisted to RTDB. */
+export type OrderSyncStatus = 'pending' | 'syncing' | 'synced' | 'error'
 
 export interface OrderItemSnapshot {
   lineId: string
@@ -124,12 +178,16 @@ export interface KdsState {
 export interface Order {
   id: string
   orderNumber: number
+  /** UTC calendar day (YYYY-MM-DD) the orderNumber was minted for. */
+  orderDate?: string
   companyId: string
   items: OrderItemSnapshot[]
   tableNumber?: string
   subtotal: number
   discount: DiscountInfo
   tax?: number
+  /** Snapshot of tax components applied at checkout. */
+  taxLines?: OrderTaxLine[]
   tip?: number
   total: number
   paymentMethod: PaymentMethod
@@ -141,7 +199,20 @@ export interface Order {
   createdByName: string
   createdAt: number
   completedAt?: number
+  updatedAt?: number
+  updatedBy?: string
+  updatedByName?: string
   orderSource?: OrderSource
+  /** Stable client id used for offline outbox idempotency. */
+  clientLocalId?: string
+  /** Client-only; never written to RTDB. */
+  syncStatus?: OrderSyncStatus
+  /** Client-only last sync error message. */
+  syncError?: string
   stripePaymentIntentId?: string
+  refundedAt?: number
+  refundedBy?: string
+  refundedByName?: string
+  stripeRefundId?: string
   kds?: KdsState
 }

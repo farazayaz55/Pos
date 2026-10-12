@@ -1,15 +1,26 @@
 import { NavLink, Outlet, useNavigate } from 'react-router-dom'
-import { useAuthStore } from '@/stores/authStore'
+import toast from 'react-hot-toast'
+import { useAuthStore, OFFLINE_SIGNOUT_MESSAGE } from '@/stores/authStore'
+import { useOnlineStatus } from '@/hooks/useOnlineStatus'
 import { cn } from '@/utils/cn'
 
 const SuperAdminLayout = () => {
   const user = useAuthStore((s) => s.user)
   const signOut = useAuthStore((s) => s.signOut)
   const navigate = useNavigate()
+  const { isOnline } = useOnlineStatus()
 
   const handleSignOut = async () => {
-    await signOut()
-    navigate('/login', { replace: true })
+    if (!isOnline) {
+      toast.error(OFFLINE_SIGNOUT_MESSAGE)
+      return
+    }
+    try {
+      await signOut()
+      navigate('/login', { replace: true })
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Sign out failed')
+    }
   }
 
   return (
@@ -32,8 +43,13 @@ const SuperAdminLayout = () => {
               <p className="text-xs font-medium text-slate-900">{user?.name}</p>
               <p className="text-[11px] text-slate-500">{user?.email}</p>
             </div>
-            <button className="btn-secondary" onClick={handleSignOut}>
-              Sign out
+            <button
+              className="btn-secondary disabled:cursor-not-allowed disabled:opacity-50"
+              onClick={() => void handleSignOut()}
+              disabled={!isOnline}
+              title={!isOnline ? OFFLINE_SIGNOUT_MESSAGE : undefined}
+            >
+              {isOnline ? 'Sign out' : 'Sign out (offline)'}
             </button>
           </div>
         </div>

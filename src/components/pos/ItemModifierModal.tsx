@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { CartModifierSelection, MenuItem, ModifierGroup } from '@/types'
+import CachedImage from '@/components/common/CachedImage'
 import { formatMoney } from '@/utils/currency'
 import { calcLineUnit } from '@/utils/orderCalc'
 
@@ -88,7 +89,11 @@ const ItemModifierModal = ({ item, groups, onCancel, onConfirm }: Props) => {
         <div className="flex items-start justify-between border-b border-slate-200 p-4">
           <div className="flex items-center gap-3">
             {item.imageUrl && (
-              <img src={item.imageUrl} alt="" className="h-14 w-14 rounded-lg object-cover" />
+              <CachedImage
+                src={item.imageUrl}
+                alt=""
+                className="h-14 w-14 rounded-lg object-cover"
+              />
             )}
             <div>
               <h3 className="font-semibold">{item.name}</h3>

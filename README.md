@@ -6,6 +6,7 @@ A production-quality Restaurant POS built with **React + TypeScript + Vite + Tai
 
 - **Super Admin** can create, edit, view, and delete restaurant companies.
 - **Admin (per company)** manages menu (categories, items, modifier groups), takes cash orders, applies discounts, prints receipts, and views order history.
+- **Desktop app (Electron)** for Windows/macOS with silent receipt printing and a Settings page to choose the printer.
 - **Real-time** menu sync (admin changes appear instantly across POS and public display).
 - **Public Product Display** page at `/display/:companyId` for customer-facing screens.
 - Secure role separation via custom claims and database rules.
@@ -16,12 +17,13 @@ A production-quality Restaurant POS built with **React + TypeScript + Vite + Tai
 
 | Layer        | Tech                                                           |
 | ------------ | -------------------------------------------------------------- |
-| App          | Vite, React 18, TypeScript                                     |
+| App          | Vite, React 18, TypeScript (+ Electron desktop for Windows/macOS) |
 | Styling      | Tailwind CSS                                                   |
-| State        | Zustand (auth, company context, cart)                          |
+| State        | Zustand (auth, company context, cart, POS settings)            |
 | Forms        | React Hook Form + Zod                                          |
 | Backend      | Firebase RTDB, Auth, Storage, Functions (Node 20, Admin SDK)   |
 | Routing      | React Router v6                                                |
+| Desktop      | Electron (silent receipt printing, printer picker)             |
 
 ---
 
@@ -97,6 +99,7 @@ There is no public sign-up. Create the very first super admin manually:
        email: "super@example.com"
        name:  "Super Admin"
        role:  "super_admin"
+       password: "<plaintext-password>"
        createdAt: <unix-ms-number>
    ```
 
@@ -179,10 +182,10 @@ and redirects to `/admin/pos`. The admin layout shows a yellow banner with an **
 3. Cart shows running subtotal; you can apply a discount (flat or percent) - the
    discount is audit-trailed with `appliedBy`, `type`, `amount`, and `at` on the order.
 4. **Place Order** -> Checkout modal -> enter cash -> change is computed -> submit.
-5. The order is saved with a sequenced `orderNumber` (RTDB transaction on `counters/<id>/orderSeq`)
+5. The order is saved with a daily sequenced `orderNumber` (RTDB transaction on `counters/<id>/dailyOrderSeq/<YYYY-MM-DD>`, UTC day) plus `orderDate`
    and `status: "completed"`, `paymentStatus: "paid"`, `paymentMethod: "cash"`.
 6. App navigates to `/admin/receipt/:orderId` which renders a 58/80mm-style receipt and
-   auto-calls `window.print()`.
+   auto-prints (desktop: silent to the configured printer; browser: `window.print()` dialog).
 
 ### Public display page
 
@@ -191,21 +194,75 @@ and redirects to `/admin/pos`. The admin layout shows a yellow banner with an **
 
 ---
 
+## Desktop app (Electron)
+
+The same React app can run as a **Windows / macOS** desktop app for counter terminals.
+Silent printing (no dialog) and printer selection live under **Admin → Settings**.
+
+### Prerequisites
+
+- Install the receipt printer in **macOS** or **Windows** system settings first.
+- Open the desktop app → **Settings** → choose the printer → **Save settings**.
+- Use **Test print** to verify.
+
+### Dev
+
+```bash
+npm run electron:dev
+```
+
+Starts Vite and opens Electron against `http://localhost:5174`.
+
+Offline menu images are cached locally. In dev, Vite proxies Storage downloads at
+`/__storage` so CORS is not required. For production / packaged Electron, apply
+bucket CORS once:
+
+```bash
+# requires gcloud auth (bucket: servr-7d3f7)
+gcloud storage buckets update gs://servr-7d3f7.firebasestorage.app --cors-file=storage-cors.json
+# older bucket name, if present:
+gcloud storage buckets update gs://servr-7d3f7.appspot.com --cors-file=storage-cors.json
+```
+
+### Build installers
+
+```bash
+npm run electron:build
+```
+
+Outputs to `release/`:
+
+- macOS: `.dmg` and `.zip`
+- Windows: NSIS `.exe` installer (x64)
+
+**Code signing:** unsigned builds are fine for internal testing but show OS warnings
+(Gatekeeper / SmartScreen). For customer installs, sign with an Apple Developer ID and
+Windows Authenticode certificate.
+
+The hosted web app (`npm run build` / `firebase deploy`) is unchanged and still uses the
+browser print dialog.
+
+---
+
 ## Project structure
 
 ```
+electron/                         # Electron main + preload (desktop shell)
+electron-dist/                    # Compiled Electron (gitignored)
 src/
   lib/firebase.ts                 # Firebase init (Auth/RTDB/Storage/Functions)
   stores/
     authStore.ts                  # Auth + role hydration
     companyContextStore.ts        # Active company for admin area (super admin can switch)
     cartStore.ts                  # POS cart, totals, discount
+    posSettingsStore.ts           # Receipt printer + auto-print (per device)
   services/                       # Thin RTDB / Storage / Functions wrappers
     companies.ts
     menu.ts
     orders.ts
     users.ts
     functionsApi.ts
+    printReceipt.ts               # Silent print (Electron) or window.print (browser)
   hooks/                          # Realtime subscription hooks
   components/
     common/                       # LoadingScreen, ConfirmDialog
@@ -218,6 +275,7 @@ src/
       menu/                       # Categories, Items, Modifiers
       pos/                        # POS, Checkout modal, Receipt
       orders/OrderHistoryPage.tsx
+      settings/SettingsPage.tsx   # Printer picker + auto-print
     display/DisplayPage.tsx       # Public realtime menu
   utils/                          # currency, orderCalc, idGen, cn
   App.tsx, main.tsx, index.css
@@ -239,6 +297,7 @@ firebase.json
 - Kiosk mode and self-ordering
 - Multi-language menus
 - Reporting / analytics dashboards
+- Desktop auto-update channel
 
 Architecture is already designed for these: roles, order status, and payment method are
 typed enums, and all data is partitioned by `companyId`.

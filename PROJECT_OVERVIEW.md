@@ -87,7 +87,8 @@ End-to-end reference for what was implemented, how each part works, and the rati
 │   ├── stores/
 │   │   ├── authStore.ts                   Sign in/out + role hydration
 │   │   ├── companyContextStore.ts         Active company (Super Admin can switch)
-│   │   └── cartStore.ts                   POS cart, discount, table number
+│   │   ├── cartStore.ts                   POS cart, discount, table number
+│   │   └── posKioskStore.ts               Browser kiosk (fullscreen) flag
 │   ├── services/                          Thin RTDB / Storage / Functions wrappers
 │   │   ├── companies.ts
 │   │   ├── menu.ts
@@ -97,7 +98,8 @@ End-to-end reference for what was implemented, how each part works, and the rati
 │   ├── hooks/                             Realtime subscription bundlers
 │   │   ├── useCompany.ts
 │   │   ├── useCompanyMenu.ts
-│   │   └── useOrders.ts
+│   │   ├── useOrders.ts
+│   │   └── usePosKioskMode.ts             Fullscreen / keyboard / wake lock
 │   ├── routes/ProtectedRoute.tsx          Role-aware route guard
 │   ├── components/
 │   │   ├── common/{LoadingScreen,ConfirmDialog,EmulatorBadge}.tsx
@@ -197,7 +199,7 @@ When the badge appears bottom-left, every Firebase call is local. Toggling the f
 
 ```
 /users/{uid}
-  email, name, role: "super_admin" | "admin", companyId?, createdAt
+  email, name, role: "super_admin" | "admin", companyId?, password?, createdAt
 
 /companies/{companyId}
   name, location, logoUrl?, phone?, adminUid, adminEmail, adminName,
@@ -215,23 +217,25 @@ When the badge appears bottom-left, every Firebase call is local. Toggling the f
     createdAt, companyId
 
 /orders/{companyId}/{orderId}
-  orderNumber, items[snapshot], tableNumber?, subtotal,
+  orderNumber, orderDate?, items[snapshot], tableNumber?, subtotal,
   discount { type, value, amount, appliedBy?, appliedByName?, at? },
-  total, paymentMethod: "cash", paymentStatus: "paid",
+  total, paymentMethod: "cash" | "card_reader" | "tap_to_pay",
+  paymentStatus: "pending" | "paid" | "refunded",
   status: "pending" | "completed" | "cancelled",
-  cashReceived, change,
+  cashReceived?, change?, stripePaymentIntentId?,
+  refundedAt?, refundedBy?, refundedByName?, stripeRefundId?,
   createdBy, createdByName, createdAt, completedAt?
-  (.indexOn createdAt, status)
+  (.indexOn createdAt, status, stripePaymentIntentId, kioskIdempotencyKey)
 
-/counters/{companyId}/orderSeq
-  integer — incremented atomically per order via runTransaction
+/counters/{companyId}/dailyOrderSeq/{YYYY-MM-DD}
+  integer — incremented atomically per order via runTransaction (resets each UTC day)
 ```
 
 Important design points:
 
 - Order items are **denormalised snapshots** — changing a menu item later never mutates historical orders or receipts.
 - Each `companyId` cleanly partitions everything, allowing the same Firebase project to host many restaurants.
-- `orderNumber` is human readable (1, 2, 3 ...) and reused as the receipt number.
+- `orderNumber` is human readable (1, 2, 3 ... per UTC day) and reused as the receipt number; displayed padded as `001`. `orderDate` stores the UTC `YYYY-MM-DD` the number was minted for. Durable identity remains the Firebase push key `id`.
 - The discount audit trail (`appliedBy`, `appliedByName`, `at`) is stored on every discounted order, satisfying the spec's discount tracking requirement.
 
 ---
@@ -263,11 +267,11 @@ File: [`functions/src/index.ts`](functions/src/index.ts) (Firebase Functions v2,
 1. Verifies the caller is `super_admin` in RTDB.
 2. Creates the Firebase Auth user with the supplied email / password / display name.
 3. Sets custom claims `{ role: "admin", companyId }`.
-4. Atomically writes `/companies/{id}` and `/users/{uid}`.
+4. Atomically writes `/companies/{id}` and `/users/{uid}` (including plaintext `password`).
 5. Returns `{ companyId, adminUid }`.
 
 ### `updateCompanyAdmin` (callable)
-- Updates the admin's display name / password via the Admin SDK, mirrors the name back to `/companies/{id}.adminName` and `/users/{uid}.name`.
+- Updates the admin's display name / password via the Admin SDK, mirrors the name back to `/companies/{id}.adminName` and `/users/{uid}.name`, and mirrors the password to `/users/{uid}.password` when changed.
 
 ### `deleteCompany` (callable)
 - Verifies super admin.
@@ -276,6 +280,13 @@ File: [`functions/src/index.ts`](functions/src/index.ts) (Firebase Functions v2,
 
 ### `setSuperAdminClaim` (callable)
 - Idempotent helper called by the client on the manually bootstrapped super admin's first sign-in. Verifies the RTDB role flag, then attaches the `role: "super_admin"` custom claim. Once set, the security rules trust the token forever.
+
+### `refundOrder` (callable, in `payments.ts`)
+- Verifies company admin (matching `companyId` claim) or super admin.
+- Full-order only: requires `status: completed` and `paymentStatus: paid`.
+- Cash: patches order to `cancelled` / `refunded` with audit fields.
+- Card: creates a Stripe refund on `stripePaymentIntentId`, then same RTDB patch (stores `stripeRefundId`).
+- Idempotent if the order is already refunded.
 
 All callables sit behind the standard Firebase callable contract (auth context auto-attached) and return typed payloads consumed by [`src/services/functionsApi.ts`](src/services/functionsApi.ts).
 
@@ -313,8 +324,8 @@ This means the client's idea of "who you are" is always **derived from RTDB**, a
 - Admins always have `activeCompanyId === user.companyId` (synced in `App.tsx`).
 
 ### `cartStore` (persisted to localStorage, scoped per company)
-- `companyId`, `lines`, `tableNumber`, `discountType`, `discountValue`.
-- `addLine`, `updateLineQuantity`, `removeLine`, `setTableNumber`, `setDiscount`, `clear`.
+- `companyId`, `lines`, `tableNumber`, `discountType`, `discountValue`, `editingOrderId`, `editingOrderNumber`.
+- `addLine`, `updateLineQuantity`, `removeLine`, `setTableNumber`, `setDiscount`, `clear`, `loadFromOrder`, `cancelEdit`.
 - Selectors: `subtotal()`, `discountAmount()`, `total()` — backed by pure functions in `utils/orderCalc.ts`.
 - Switching companies wipes the cart automatically so super admin impersonation never mixes carts.
 
@@ -420,9 +431,14 @@ Flow:
 - Each line with modifiers, note, quantity stepper, line total, and remove button.
 - Discount section (none / flat / percent) with computed amount.
 - Live subtotal / discount / total.
-- **Place Order** button opens the checkout modal.
+- **Place Order** (or **Save Order** when editing) opens the checkout modal.
+- When editing a cash POS order, the header shows `Editing #N` with a **Cancel edit** control.
 
 Cart calculations live in pure helpers ([`utils/orderCalc.ts`](src/utils/orderCalc.ts)) so they are unit-test friendly.
+
+**Edit order (cash POS only):** From Order History or Receipt, **Edit Order** hydrates the cart via `loadFromOrder` and sets `editingOrderId`. Eligible orders are `paymentMethod: cash`, `paymentStatus: paid`, `status: completed`, and not kiosk (`orderSource !== "kiosk"`). Saving reuses checkout cash entry and calls `updateCompletedCashOrder`, which overwrites items/totals/cash on the same RTDB node (keeps `orderNumber` / `createdAt` / `createdBy*`).
+
+**Browser kiosk mode:** POS header has **Enter kiosk** (requires a user gesture). It requests fullscreen, hides admin sidebar/chrome via `posKioskStore`, locks Escape when Keyboard Lock is available (Chrome/Edge), and may request a screen Wake Lock. Exit by **holding Exit for 3 seconds**. Leaving fullscreen any other way also clears kiosk mode. This is best-effort only — a web app cannot block Alt+Tab or switching apps. For a true locked terminal, launch Chrome with `--kiosk https://your-app/admin/pos` (or use managed-device kiosk mode).
 
 ---
 
@@ -433,20 +449,18 @@ Cart calculations live in pure helpers ([`utils/orderCalc.ts`](src/utils/orderCa
 - Prefills `cashReceived = total`.
 - Quick-cash chips ($10 / $20 / $50 / $100 + Exact).
 - Validates `cashReceived >= total` and computes `change` live.
-- On submit calls `createAndCompleteOrder` which:
-  1. Runs a **transaction** on `/counters/{companyId}/orderSeq` to atomically generate the next human-readable `orderNumber`.
-  2. Pushes a new node under `/orders/{companyId}/{pushId}` with:
-     - Snapshotted item array.
-     - `paymentMethod: "cash"`, `paymentStatus: "paid"`, `status: "completed"` (cash MVP — single-step completion).
-     - Discount audit trail (`appliedBy`, `appliedByName`, `at`).
-     - `createdBy`, `createdByName`, `createdAt`, `completedAt`.
-- Clears the cart, toasts success, navigates to `/admin/receipt/:orderId`.
+- On submit:
+  - **New order:** calls `createAndCompleteOrder` which:
+    1. Runs a **transaction** on `/counters/{companyId}/dailyOrderSeq/{YYYY-MM-DD}` to atomically generate the next human-readable `orderNumber` for that UTC day (and stores `orderDate`).
+    2. Pushes a new node under `/orders/{companyId}/{pushId}` with snapshotted items, cash payment fields, and discount audit trail.
+  - **Edit mode:** calls `updateCompletedCashOrder` to rewrite items/totals/cash on the existing order (no new order number).
+- Clears the cart (and edit state), toasts success, navigates to `/admin/receipt/:orderId`.
 
 ### `ReceiptPage` ([`pos/ReceiptPage.tsx`](src/pages/admin/pos/ReceiptPage.tsx))
 - Fetches the order once with `getOrder`.
 - Renders an 80mm-thermal-style receipt: company logo, name, location, order #, date, table, cashier, line items (with modifiers and notes), subtotal, discount, total, cash, change.
 - **Auto invokes `window.print()`** ~350 ms after load.
-- Provides "New order" and manual "Print" buttons (both hidden when printing thanks to the `.no-print` CSS in `index.css`).
+- Provides "New order", **Edit Order** (when eligible), and manual "Print" buttons (hidden when printing thanks to the `.no-print` CSS in `index.css`).
 
 ---
 
@@ -457,7 +471,7 @@ Cart calculations live in pure helpers ([`utils/orderCalc.ts`](src/utils/orderCa
 - Realtime subscription to `/orders/{companyId}` (ordered by `createdAt`, descending in memory).
 - Stat cards: total orders, total revenue, average revenue per order — all live for the current filter.
 - Filters: search by order # / table / cashier, date filter (Today / Last 7 days / All).
-- Detail drawer on row click shows the full item list, modifiers, notes, discount audit info, and a button to open the receipt page.
+- Detail drawer on row click shows the full item list, modifiers, notes, discount audit info, receipt link, **Edit Order** (cash POS completed/paid only), and Refund when applicable.
 
 ---
 
@@ -507,7 +521,7 @@ The three hooks `useCompanyMenu`, `useCompany`, `useOrders` are the **only** con
 After running `npm install` (root + `functions/`) and configuring `.env`:
 
 1. **Bootstrap the super admin** once: create a user in Firebase Auth, then in RTDB add  
-   `users/{uid}: { role: "super_admin", name, email, createdAt }`.
+   `users/{uid}: { role: "super_admin", name, email, password, createdAt }`.
 2. Sign in at `/login` — the client will auto-attach the `super_admin` custom claim.
 3. Create a Company. The Cloud Function provisions the Auth user and assigns custom claims.
 4. Click **View** on the new company → POS opens with the impersonation banner.

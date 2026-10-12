@@ -3,6 +3,7 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
+  "main": "electron-dist/main.js",
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
@@ -15,11 +16,50 @@
     "grant:public": "npm --prefix functions run grant:public",
     "deploy:rules": "firebase deploy --only database,storage",
     "deploy:functions": "firebase deploy --only functions",
-    "deploy": "npm run build && firebase deploy"
+    "deploy": "npm run build && firebase deploy",
+    "storage:cors": "gcloud storage buckets update gs://servr-7d3f7.firebasestorage.app --cors-file=storage-cors.json",
+
+    "electron:compile": "tsc -p electron/tsconfig.json && node -e \"require('fs').writeFileSync('electron-dist/package.json', JSON.stringify({type:'commonjs'}))\"",
+    "electron:dev": "npm run electron:compile && concurrently -k \"vite\" \"wait-on http://127.0.0.1:5174 && electron .\"",
+    "electron:build": "cross-env ELECTRON=true npm run build && npm run electron:compile && electron-builder --mac --win"
+  },
+  "build": {
+    "appId": "com.posmvp.desktop",
+    "productName": "Restaurant POS",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "electron-dist/**/*",
+      "package.json"
+    ],
+    "mac": {
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "category": "public.app-category.business"
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
   },
   "dependencies": {
     "@hookform/resolvers": "^3.9.0",
     "clsx": "^2.1.1",
+    "dexie": "^4.4.6",
     "firebase": "^10.13.2",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
@@ -36,12 +76,17 @@
     "@typescript-eslint/parser": "^8.4.0",
     "@vitejs/plugin-react": "^4.3.1",
     "autoprefixer": "^10.4.20",
+    "concurrently": "^9.1.2",
+    "cross-env": "^7.0.3",
+    "electron": "^34.5.8",
+    "electron-builder": "^25.1.8",
     "eslint": "^8.57.0",
     "eslint-plugin-react-hooks": "^4.6.2",
     "eslint-plugin-react-refresh": "^0.4.11",
     "postcss": "^8.4.45",
     "tailwindcss": "^3.4.10",
     "typescript": "^5.5.4",
-    "vite": "^5.4.3"
+    "vite": "^5.4.3",
+    "wait-on": "^8.0.2"
   }
 }

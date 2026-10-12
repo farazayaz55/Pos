@@ -1,12 +1,13 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
-import type { CartLine, CartModifierSelection, DiscountType } from '@/types'
+import type { CartLine, CartModifierSelection, DiscountType, Order } from '@/types'
 import { generateId } from '@/utils/idGen'
 import {
   calcDiscountAmount,
   calcLineTotal,
   calcLineUnit,
   calcSubtotal,
+  calcTaxableBase,
   calcTotal,
 } from '@/utils/orderCalc'
 
@@ -26,6 +27,8 @@ interface CartState {
   tableNumber: string
   discountType: DiscountType
   discountValue: number
+  editingOrderId: string | null
+  editingOrderNumber: number | null
 
   setCompanyId: (companyId: string | null) => void
   addLine: (input: AddLineInput) => void
@@ -33,11 +36,25 @@ interface CartState {
   removeLine: (lineId: string) => void
   setTableNumber: (n: string) => void
   setDiscount: (type: DiscountType, value: number) => void
+  loadFromOrder: (order: Order) => void
+  cancelEdit: () => void
   clear: () => void
 
   subtotal: () => number
   discountAmount: () => number
-  total: () => number
+  /** Post-discount amount before tax. */
+  taxableBase: () => number
+  /** Total including optional tax amount (default 0). */
+  total: (taxAmount?: number) => number
+}
+
+const emptyCartFields = {
+  lines: [] as CartLine[],
+  tableNumber: '',
+  discountType: 'none' as DiscountType,
+  discountValue: 0,
+  editingOrderId: null as string | null,
+  editingOrderNumber: null as number | null,
 }
 
 const buildLine = (input: AddLineInput): CartLine => {
@@ -61,20 +78,14 @@ export const useCartStore = create<CartState>()(
   persist(
     (set, get) => ({
       companyId: null,
-      lines: [],
-      tableNumber: '',
-      discountType: 'none',
-      discountValue: 0,
+      ...emptyCartFields,
 
       setCompanyId: (companyId) => {
         const current = get().companyId
         if (current !== companyId) {
           set({
             companyId,
-            lines: [],
-            tableNumber: '',
-            discountType: 'none',
-            discountValue: 0,
+            ...emptyCartFields,
           })
         }
       },
@@ -106,23 +117,54 @@ export const useCartStore = create<CartState>()(
       setDiscount: (type, value) =>
         set({ discountType: type, discountValue: value }),
 
-      clear: () =>
+      loadFromOrder: (order) => {
+        const lines: CartLine[] = order.items.map((it) => ({
+          lineId: it.lineId,
+          itemId: it.itemId,
+          itemName: it.itemName,
+          basePrice: it.basePrice,
+          quantity: it.quantity,
+          modifiers: it.modifiers ?? [],
+          unitPrice: it.unitPrice,
+          lineTotal: it.lineTotal,
+          ...(it.note ? { note: it.note } : {}),
+        }))
         set({
-          lines: [],
-          tableNumber: '',
-          discountType: 'none',
-          discountValue: 0,
-        }),
+          companyId: order.companyId,
+          lines,
+          tableNumber: order.tableNumber ?? '',
+          discountType: order.discount.type,
+          discountValue: order.discount.value,
+          editingOrderId: order.id,
+          editingOrderNumber: order.orderNumber,
+        })
+      },
+
+      cancelEdit: () => set({ ...emptyCartFields }),
+
+      clear: () => set({ ...emptyCartFields }),
 
       subtotal: () => calcSubtotal(get().lines),
       discountAmount: () => {
         const s = get()
         return calcDiscountAmount(calcSubtotal(s.lines), s.discountType, s.discountValue)
       },
-      total: () => {
+      taxableBase: () => {
         const s = get()
         const sub = calcSubtotal(s.lines)
-        return calcTotal(sub, calcDiscountAmount(sub, s.discountType, s.discountValue))
+        return calcTaxableBase(
+          sub,
+          calcDiscountAmount(sub, s.discountType, s.discountValue),
+        )
+      },
+      total: (taxAmount = 0) => {
+        const s = get()
+        const sub = calcSubtotal(s.lines)
+        const base = calcTaxableBase(
+          sub,
+          calcDiscountAmount(sub, s.discountType, s.discountValue),
+        )
+        return calcTotal(base, taxAmount)
       },
     }),
     {
@@ -133,6 +175,8 @@ export const useCartStore = create<CartState>()(
         tableNumber: state.tableNumber,
         discountType: state.discountType,
         discountValue: state.discountValue,
+        editingOrderId: state.editingOrderId,
+        editingOrderNumber: state.editingOrderNumber,
       }),
     },
   ),

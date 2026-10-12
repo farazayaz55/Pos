@@ -3,6 +3,7 @@ import { useParams } from 'react-router-dom'
 import { useCompanyMenu } from '@/hooks/useCompanyMenu'
 import { useCompany } from '@/hooks/useCompany'
 import LoadingScreen from '@/components/common/LoadingScreen'
+import CachedImage from '@/components/common/CachedImage'
 
 const formatPriceCompact = (value: number): string => {
   if (!Number.isFinite(value)) return '0'
@@ -30,8 +31,9 @@ const DisplayPage = () => {
         {(company?.name || company?.location || company?.logoUrl) && (
           <div className="mb-6 flex flex-col items-center text-center">
             {company?.logoUrl && (
-              <img
+              <CachedImage
                 src={company.logoUrl}
+                companyId={companyId}
                 alt=""
                 className="mb-3 h-16 w-16 rounded-full object-cover ring-1 ring-slate-300"
               />

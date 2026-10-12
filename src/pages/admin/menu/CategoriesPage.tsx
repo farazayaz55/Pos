@@ -11,6 +11,8 @@ import {
 import type { Category } from '@/types'
 import LoadingScreen from '@/components/common/LoadingScreen'
 import ConfirmDialog from '@/components/common/ConfirmDialog'
+import CachedImage from '@/components/common/CachedImage'
+import { ensureImageCached } from '@/localdb/imageCache'
 
 interface CategoryDraft {
   id?: string
@@ -57,6 +59,7 @@ const CategoriesPage = () => {
       let imageUrl = editing.imageUrl
       if (editing.imageFile) {
         imageUrl = await uploadMenuImage(companyId, editing.imageFile, 'categories')
+        if (imageUrl) void ensureImageCached(imageUrl, companyId, { force: true })
       }
       if (editing.id) {
         await updateCategory(companyId, editing.id, {
@@ -121,7 +124,17 @@ const CategoriesPage = () => {
             <div key={c.id} className="card overflow-hidden">
               <div className="flex h-28 items-center justify-center bg-slate-50">
                 {c.imageUrl ? (
-                  <img src={c.imageUrl} alt={c.name} className="h-full w-full object-cover" />
+                  <CachedImage
+                    src={c.imageUrl}
+                    companyId={companyId}
+                    alt={c.name}
+                    className="h-full w-full object-cover"
+                    fallback={
+                      <span className="text-2xl font-bold text-slate-300">
+                        {c.name.slice(0, 2).toUpperCase()}
+                      </span>
+                    }
+                  />
                 ) : (
                   <span className="text-2xl font-bold text-slate-300">
                     {c.name.slice(0, 2).toUpperCase()}
@@ -210,7 +223,11 @@ const CategoryDrawer = ({ draft, setDraft, onClose, onSave, saving }: DrawerProp
                     className="h-full w-full object-cover"
                   />
                 ) : draft.imageUrl ? (
-                  <img src={draft.imageUrl} alt="" className="h-full w-full object-cover" />
+                  <CachedImage
+                    src={draft.imageUrl}
+                    alt=""
+                    className="h-full w-full object-cover"
+                  />
                 ) : (
                   <span className="text-[10px] text-slate-400">Image</span>
                 )}

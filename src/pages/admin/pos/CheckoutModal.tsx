@@ -4,9 +4,13 @@ import { useNavigate } from 'react-router-dom'
 import { useAuthStore } from '@/stores/authStore'
 import { useCartStore } from '@/stores/cartStore'
 import { useCompanyContextStore } from '@/stores/companyContextStore'
-import { createAndCompleteOrder } from '@/services/orders'
+import { useCompanyTaxSettings } from '@/hooks/useCompanyTaxSettings'
+import { useOnlineStatus } from '@/hooks/useOnlineStatus'
+import { placeCashOrder, placeCashOrderUpdate } from '@/services/localOrders'
+import { isLocalOrderId } from '@/localdb/db'
 import { formatMoney } from '@/utils/currency'
-import { calcChange } from '@/utils/orderCalc'
+import { formatOrderNumber } from '@/utils/businessDate'
+import { calcChange, calcTax, calcTotal } from '@/utils/orderCalc'
 
 interface Props {
   open: boolean
@@ -18,18 +22,29 @@ const QUICK_CASH = [10, 20, 50, 100]
 const CheckoutModal = ({ open, onClose }: Props) => {
   const user = useAuthStore((s) => s.user)
   const companyId = useCompanyContextStore((s) => s.activeCompanyId)
+  const { components } = useCompanyTaxSettings(companyId || undefined)
+  const { isOnline } = useOnlineStatus()
   const lines = useCartStore((s) => s.lines)
   const tableNumber = useCartStore((s) => s.tableNumber)
   const discountType = useCartStore((s) => s.discountType)
   const discountValue = useCartStore((s) => s.discountValue)
+  const editingOrderId = useCartStore((s) => s.editingOrderId)
+  const editingOrderNumber = useCartStore((s) => s.editingOrderNumber)
   const subtotal = useCartStore((s) => s.subtotal())
   const discountAmount = useCartStore((s) => s.discountAmount())
-  const total = useCartStore((s) => s.total())
+  const taxableBase = useCartStore((s) => s.taxableBase())
+  const { tax, taxLines } = useMemo(
+    () => calcTax(taxableBase, components),
+    [taxableBase, components],
+  )
+  const total = useMemo(() => calcTotal(taxableBase, tax), [taxableBase, tax])
   const clear = useCartStore((s) => s.clear)
   const navigate = useNavigate()
 
   const [cashInput, setCashInput] = useState('')
   const [submitting, setSubmitting] = useState(false)
+
+  const isEditing = !!editingOrderId
 
   useEffect(() => {
     if (open) {
@@ -57,24 +72,47 @@ const CheckoutModal = ({ open, onClose }: Props) => {
       toast.error('Cash received is less than total')
       return
     }
+    if (isEditing && !isLocalOrderId(editingOrderId) && !isOnline) {
+      toast.error('Editing synced orders requires an internet connection')
+      return
+    }
     setSubmitting(true)
     try {
-      const order = await createAndCompleteOrder({
-        companyId,
-        createdBy: user.uid,
-        createdByName: user.name,
-        lines,
-        tableNumber: tableNumber || undefined,
-        discount: {
-          type: discountType,
-          value: discountValue,
-          amount: discountAmount,
-        },
-        cashReceived,
-      })
+      const discount = {
+        type: discountType,
+        value: discountValue,
+        amount: discountAmount,
+      }
+      const order = isEditing
+        ? await placeCashOrderUpdate({
+            companyId,
+            orderId: editingOrderId,
+            updatedBy: user.uid,
+            updatedByName: user.name,
+            lines,
+            tableNumber: tableNumber || undefined,
+            discount,
+            cashReceived,
+          })
+        : await placeCashOrder({
+            companyId,
+            createdBy: user.uid,
+            createdByName: user.name,
+            lines,
+            tableNumber: tableNumber || undefined,
+            discount,
+            cashReceived,
+          })
       clear()
       onClose()
-      toast.success(`Order #${order.orderNumber} completed`)
+      const pendingSync = order.syncStatus === 'pending' || order.syncStatus === 'error'
+      toast.success(
+        isEditing
+          ? `Order #${formatOrderNumber(order.orderNumber)} updated`
+          : pendingSync
+            ? `Order #${formatOrderNumber(order.orderNumber)} saved offline`
+            : `Order #${formatOrderNumber(order.orderNumber)} completed`,
+      )
       navigate(`/admin/receipt/${order.id}`)
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Failed to complete order'
@@ -89,7 +127,11 @@ const CheckoutModal = ({ open, onClose }: Props) => {
       <div className="card w-full max-w-md p-6">
         <h2 className="text-lg font-semibold">Cash Payment</h2>
         <p className="mt-1 text-xs text-slate-500">
-          Order will be marked completed on submit.
+          {isEditing
+            ? `Updating order #${formatOrderNumber(editingOrderNumber!)}. Re-enter cash received.`
+            : isOnline
+              ? 'Order will be marked completed on submit.'
+              : 'Offline — order will be saved locally and synced when online.'}
         </p>
 
         <div className="mt-4 space-y-2 rounded-lg bg-slate-50 p-3 text-sm">
@@ -101,6 +143,20 @@ const CheckoutModal = ({ open, onClose }: Props) => {
             <div className="flex justify-between text-emerald-700">
               <span>Discount</span>
               <span>-{formatMoney(discountAmount)}</span>
+            </div>
+          )}
+          {taxLines.map((line) => (
+            <div key={`${line.name}-${line.rate}`} className="flex justify-between text-slate-600">
+              <span>
+                {line.name} ({Math.round(line.rate * 10000) / 100}%)
+              </span>
+              <span>{formatMoney(line.amount)}</span>
+            </div>
+          ))}
+          {taxLines.length === 0 && tax > 0 && (
+            <div className="flex justify-between text-slate-600">
+              <span>Tax</span>
+              <span>{formatMoney(tax)}</span>
             </div>
           )}
           <div className="flex justify-between border-t border-slate-200 pt-2 text-base font-bold">
@@ -163,7 +219,11 @@ const CheckoutModal = ({ open, onClose }: Props) => {
             className="btn-primary flex-[2]"
             disabled={submitting || insufficient}
           >
-            {submitting ? 'Processing...' : 'Complete & Print'}
+            {submitting
+              ? 'Processing...'
+              : isEditing
+                ? 'Save & Print'
+                : 'Complete & Print'}
           </button>
         </div>
       </div>

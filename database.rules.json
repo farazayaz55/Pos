@@ -13,14 +13,25 @@
       "$companyId": {
         ".read": "auth != null",
         ".write": "auth != null && auth.token.role == 'super_admin'",
-        ".validate": "newData.hasChildren(['name', 'adminUid', 'createdAt'])"
+        ".validate": "newData.hasChildren(['name', 'adminUid', 'createdAt'])",
+        "team": {
+          ".read": "auth != null && (auth.token.role == 'super_admin' || ((auth.token.role == 'admin' || auth.token.role == 'staff') && auth.token.companyId == $companyId))",
+          ".write": false
+        }
+      }
+    },
+
+    "taxSettings": {
+      "$companyId": {
+        ".read": "auth != null",
+        ".write": "auth != null && (auth.token.role == 'super_admin' || (auth.token.role == 'admin' && auth.token.companyId == $companyId) || (auth.token.role == 'staff' && auth.token.companyId == $companyId && auth.token.permissions.settings == true))"
       }
     },
 
     "menu": {
       "$companyId": {
         ".read": true,
-        ".write": "auth != null && (auth.token.role == 'super_admin' || (auth.token.role == 'admin' && auth.token.companyId == $companyId))",
+        ".write": "auth != null && (auth.token.role == 'super_admin' || (auth.token.role == 'admin' && auth.token.companyId == $companyId) || (auth.token.role == 'staff' && auth.token.companyId == $companyId && auth.token.permissions.menu == true))",
 
         "categories": {
           "$catId": {
@@ -42,8 +53,8 @@
 
     "orders": {
       "$companyId": {
-        ".read": "auth != null && (auth.token.role == 'super_admin' || (auth.token.role == 'admin' && auth.token.companyId == $companyId))",
-        ".write": "auth != null && (auth.token.role == 'super_admin' || (auth.token.role == 'admin' && auth.token.companyId == $companyId))",
+        ".read": "auth != null && (auth.token.role == 'super_admin' || (auth.token.role == 'admin' && auth.token.companyId == $companyId) || (auth.token.role == 'staff' && auth.token.companyId == $companyId && (auth.token.permissions.pos == true || auth.token.permissions.orders == true)))",
+        ".write": "auth != null && (auth.token.role == 'super_admin' || (auth.token.role == 'admin' && auth.token.companyId == $companyId) || (auth.token.role == 'staff' && auth.token.companyId == $companyId && auth.token.permissions.pos == true))",
         ".indexOn": [
           "createdAt",
           "status",
@@ -55,8 +66,8 @@
 
     "counters": {
       "$companyId": {
-        ".read": "auth != null && (auth.token.role == 'super_admin' || (auth.token.role == 'admin' && auth.token.companyId == $companyId))",
-        ".write": "auth != null && (auth.token.role == 'super_admin' || (auth.token.role == 'admin' && auth.token.companyId == $companyId))"
+        ".read": "auth != null && (auth.token.role == 'super_admin' || (auth.token.role == 'admin' && auth.token.companyId == $companyId) || (auth.token.role == 'staff' && auth.token.companyId == $companyId && (auth.token.permissions.pos == true || auth.token.permissions.orders == true)))",
+        ".write": "auth != null && (auth.token.role == 'super_admin' || (auth.token.role == 'admin' && auth.token.companyId == $companyId) || (auth.token.role == 'staff' && auth.token.companyId == $companyId && auth.token.permissions.pos == true))"
       }
     }
   }

@@ -12,6 +12,8 @@ import {
 import type { MenuItem } from '@/types'
 import LoadingScreen from '@/components/common/LoadingScreen'
 import ConfirmDialog from '@/components/common/ConfirmDialog'
+import CachedImage from '@/components/common/CachedImage'
+import { ensureImageCached } from '@/localdb/imageCache'
 import { formatMoney } from '@/utils/currency'
 
 interface ItemDraft {
@@ -91,6 +93,7 @@ const ItemsPage = () => {
       let imageUrl = editing.imageUrl
       if (editing.imageFile) {
         imageUrl = await uploadMenuImage(companyId, editing.imageFile, 'items')
+        if (imageUrl) void ensureImageCached(imageUrl, companyId, { force: true })
       }
       if (editing.id) {
         await updateItem(companyId, editing.id, {
@@ -204,7 +207,17 @@ const ItemsPage = () => {
               <div key={item.id} className="card overflow-hidden">
                 <div className="relative flex h-32 items-center justify-center bg-slate-50">
                   {item.imageUrl ? (
-                    <img src={item.imageUrl} alt={item.name} className="h-full w-full object-cover" />
+                    <CachedImage
+                      src={item.imageUrl}
+                      companyId={companyId}
+                      alt={item.name}
+                      className="h-full w-full object-cover"
+                      fallback={
+                        <span className="text-2xl font-bold text-slate-300">
+                          {item.name.slice(0, 2).toUpperCase()}
+                        </span>
+                      }
+                    />
                   ) : (
                     <span className="text-2xl font-bold text-slate-300">
                       {item.name.slice(0, 2).toUpperCase()}
@@ -319,7 +332,11 @@ const ItemDrawer = ({
                 {draft.imageFile ? (
                   <img src={URL.createObjectURL(draft.imageFile)} alt="" className="h-full w-full object-cover" />
                 ) : draft.imageUrl ? (
-                  <img src={draft.imageUrl} alt="" className="h-full w-full object-cover" />
+                  <CachedImage
+                    src={draft.imageUrl}
+                    alt=""
+                    className="h-full w-full object-cover"
+                  />
                 ) : (
                   <span className="text-[10px] text-slate-400">Image</span>
                 )}

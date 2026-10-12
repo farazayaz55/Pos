@@ -1,11 +1,18 @@
 import { useMemo, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import toast from 'react-hot-toast'
 import { useCompanyContextStore } from '@/stores/companyContextStore'
+import { useCartStore } from '@/stores/cartStore'
 import { useOrders } from '@/hooks/useOrders'
-import { completeKioskCashOrder } from '@/services/orders'
+import { useOnlineStatus } from '@/hooks/useOnlineStatus'
+import { canEditCashPosOrder, completeKioskCashOrder } from '@/services/orders'
+import { refundOrder } from '@/services/functionsApi'
+import { retryOutboxOrder, syncPendingOrdersWithToast } from '@/localdb/syncOrders'
+import { isLocalOrderId } from '@/localdb/db'
 import { formatMoney } from '@/utils/currency'
+import { formatOrderNumber } from '@/utils/businessDate'
 import LoadingScreen from '@/components/common/LoadingScreen'
+import ConfirmDialog from '@/components/common/ConfirmDialog'
 import type { Order } from '@/types'
 
 const formatDateTime = (ts: number) =>
@@ -24,15 +31,33 @@ const isToday = (ts: number) => {
   )
 }
 
+const isRevenueOrder = (o: Order) =>
+  o.paymentStatus === 'paid' && o.status === 'completed'
+
 type DateFilter = 'all' | 'today' | '7d'
+
+const isPendingSync = (o: Order) =>
+  o.syncStatus === 'pending' ||
+  o.syncStatus === 'syncing' ||
+  o.syncStatus === 'error' ||
+  isLocalOrderId(o.id)
 
 const OrderHistoryPage = () => {
   const companyId = useCompanyContextStore((s) => s.activeCompanyId) || ''
   const { orders, loading } = useOrders(companyId)
+  const { isOnline } = useOnlineStatus()
+  const navigate = useNavigate()
+  const loadFromOrder = useCartStore((s) => s.loadFromOrder)
+  const cartLines = useCartStore((s) => s.lines)
+  const editingOrderId = useCartStore((s) => s.editingOrderId)
   const [search, setSearch] = useState('')
   const [dateFilter, setDateFilter] = useState<DateFilter>('today')
   const [selected, setSelected] = useState<Order | null>(null)
   const [updating, setUpdating] = useState(false)
+  const [refundConfirm, setRefundConfirm] = useState<Order | null>(null)
+  const [refunding, setRefunding] = useState(false)
+  const [editConfirm, setEditConfirm] = useState<Order | null>(null)
+  const [syncing, setSyncing] = useState(false)
 
   const filtered = useMemo(() => {
     const now = Date.now()
@@ -43,6 +68,7 @@ const OrderHistoryPage = () => {
         const q = search.toLowerCase()
         if (
           !String(o.orderNumber).includes(q) &&
+          !formatOrderNumber(o.orderNumber).includes(q) &&
           !(o.tableNumber || '').toLowerCase().includes(q) &&
           !o.createdByName.toLowerCase().includes(q)
         ) {
@@ -54,11 +80,12 @@ const OrderHistoryPage = () => {
   }, [orders, dateFilter, search])
 
   const stats = useMemo(() => {
-    const total = filtered.reduce((s, o) => s + o.total, 0)
+    const revenueOrders = filtered.filter(isRevenueOrder)
+    const total = revenueOrders.reduce((s, o) => s + o.total, 0)
     return {
-      count: filtered.length,
+      count: revenueOrders.length,
       revenue: total,
-      avg: filtered.length ? total / filtered.length : 0,
+      avg: revenueOrders.length ? total / revenueOrders.length : 0,
     }
   }, [filtered])
 
@@ -69,7 +96,7 @@ const OrderHistoryPage = () => {
     setUpdating(true)
     try {
       await completeKioskCashOrder(companyId, order.id)
-      toast.success(`Order #${order.orderNumber} completed`)
+      toast.success(`Order #${formatOrderNumber(order.orderNumber)} completed`)
       setSelected(null)
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Failed to update order'
@@ -79,11 +106,109 @@ const OrderHistoryPage = () => {
     }
   }
 
+  const handleRefund = async () => {
+    if (!companyId || !refundConfirm) return
+    if (!isOnline) {
+      toast.error('Refunds require an internet connection')
+      return
+    }
+    if (isPendingSync(refundConfirm)) {
+      toast.error('Wait until this order has synced before refunding')
+      return
+    }
+    setRefunding(true)
+    try {
+      const result = await refundOrder({
+        companyId,
+        orderId: refundConfirm.id,
+      })
+      if (result.data.alreadyRefunded) {
+        toast.success(`Order #${formatOrderNumber(refundConfirm.orderNumber)} was already refunded`)
+      } else {
+        toast.success(`Order #${formatOrderNumber(refundConfirm.orderNumber)} refunded`)
+      }
+      setRefundConfirm(null)
+      setSelected(null)
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'Failed to refund order'
+      toast.error(msg)
+    } finally {
+      setRefunding(false)
+    }
+  }
+
+  const startEdit = (order: Order) => {
+    if (!isPendingSync(order) && !isOnline) {
+      toast.error('Editing synced orders requires an internet connection')
+      return
+    }
+    loadFromOrder(order)
+    setEditConfirm(null)
+    setSelected(null)
+    toast.success(`Editing order #${formatOrderNumber(order.orderNumber)}`)
+    navigate('/admin/pos')
+  }
+
+  const handleEditRequest = (order: Order) => {
+    const cartBusy =
+      cartLines.length > 0 && editingOrderId !== order.id
+    if (cartBusy) {
+      setEditConfirm(order)
+      return
+    }
+    startEdit(order)
+  }
+
+  const handleRetrySync = async (order: Order) => {
+    if (!isOnline) {
+      toast.error('Connect to the internet to sync')
+      return
+    }
+    setSyncing(true)
+    try {
+      await retryOutboxOrder(order.clientLocalId || order.id)
+      setSelected(null)
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Sync failed')
+    } finally {
+      setSyncing(false)
+    }
+  }
+
+  const handleSyncAll = async () => {
+    if (!isOnline) {
+      toast.error('Connect to the internet to sync')
+      return
+    }
+    setSyncing(true)
+    try {
+      await syncPendingOrdersWithToast(companyId)
+    } finally {
+      setSyncing(false)
+    }
+  }
+
+  const pendingCount = orders.filter(isPendingSync).length
+
   return (
     <div className="p-6">
-      <div className="mb-6">
-        <h1 className="text-2xl font-bold text-slate-900">Orders</h1>
-        <p className="text-sm text-slate-500">All orders including kiosk cash.</p>
+      <div className="mb-6 flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h1 className="text-2xl font-bold text-slate-900">Orders</h1>
+          <p className="text-sm text-slate-500">All orders including kiosk cash.</p>
+        </div>
+        {pendingCount > 0 && (
+          <button
+            type="button"
+            onClick={() => void handleSyncAll()}
+            disabled={!isOnline || syncing}
+            className="btn-secondary text-xs"
+          >
+            {syncing
+              ? 'Syncing…'
+              : `Retry sync (${pendingCount})`}
+          </button>
+        )}
       </div>
 
       <div className="mb-4 grid grid-cols-1 gap-3 sm:grid-cols-3">
@@ -138,7 +263,7 @@ const OrderHistoryPage = () => {
               <tbody className="divide-y divide-slate-100">
                 {filtered.map((o) => (
                   <tr key={o.id} className="hover:bg-slate-50">
-                    <td className="px-4 py-2 font-semibold">#{o.orderNumber}</td>
+                    <td className="px-4 py-2 font-semibold">#{formatOrderNumber(o.orderNumber)}</td>
                     <td className="px-4 py-2 text-slate-600">{formatDateTime(o.createdAt)}</td>
                     <td className="px-4 py-2 text-slate-600">{o.createdByName}</td>
                     <td className="px-4 py-2 text-slate-600">{o.tableNumber || '—'}</td>
@@ -147,17 +272,25 @@ const OrderHistoryPage = () => {
                     </td>
                     <td className="px-4 py-2 text-right font-bold">{formatMoney(o.total)}</td>
                     <td className="px-4 py-2">
-                      <span
-                        className={
-                          o.status === 'completed'
-                            ? 'badge-success'
-                            : o.status === 'cancelled'
-                              ? 'badge-muted'
-                              : 'badge-warn'
-                        }
-                      >
-                        {o.status}
-                      </span>
+                      <div className="flex flex-wrap items-center gap-1">
+                        <span
+                          className={
+                            o.status === 'completed'
+                              ? 'badge-success'
+                              : o.status === 'cancelled'
+                                ? 'badge-muted'
+                                : 'badge-warn'
+                          }
+                        >
+                          {o.paymentStatus === 'refunded' ? 'refunded' : o.status}
+                        </span>
+                        {o.syncStatus === 'error' && (
+                          <span className="badge-warn">sync failed</span>
+                        )}
+                        {(o.syncStatus === 'pending' || o.syncStatus === 'syncing') && (
+                          <span className="badge-warn">pending sync</span>
+                        )}
+                      </div>
                     </td>
                     <td className="px-4 py-2 text-right">
                       <div className="flex justify-end gap-2">
@@ -188,9 +321,50 @@ const OrderHistoryPage = () => {
           order={selected}
           onClose={() => setSelected(null)}
           onMarkPaid={() => handleMarkPaid(selected)}
-          updating={updating}
+          onRefund={() => setRefundConfirm(selected)}
+          onEdit={() => handleEditRequest(selected)}
+          onRetrySync={() => void handleRetrySync(selected)}
+          updating={updating || syncing}
+          isOnline={isOnline}
         />
       )}
+
+      <ConfirmDialog
+        open={!!editConfirm}
+        title={`Replace current cart?`}
+        message={
+          <>
+            Your cart has items. Load order #{editConfirm ? formatOrderNumber(editConfirm.orderNumber) : ''} for editing
+            and discard the current cart?
+          </>
+        }
+        confirmLabel="Edit order"
+        onConfirm={() => editConfirm && startEdit(editConfirm)}
+        onCancel={() => setEditConfirm(null)}
+      />
+
+      <ConfirmDialog
+        open={!!refundConfirm}
+        title={`Refund order #${refundConfirm ? formatOrderNumber(refundConfirm.orderNumber) : ''}?`}
+        message={
+          refundConfirm?.paymentMethod === 'cash' ? (
+            <>
+              This marks the order as refunded. Return{' '}
+              <b>{formatMoney(refundConfirm.total)}</b> cash to the customer.
+            </>
+          ) : (
+            <>
+              Stripe will reverse the card charge of{' '}
+              <b>{formatMoney(refundConfirm?.total ?? 0)}</b>.
+            </>
+          )
+        }
+        confirmLabel="Refund"
+        destructive
+        busy={refunding}
+        onConfirm={() => void handleRefund()}
+        onCancel={() => !refunding && setRefundConfirm(null)}
+      />
     </div>
   )
 }
@@ -206,146 +380,246 @@ const OrderDetailDrawer = ({
   order,
   onClose,
   onMarkPaid,
+  onRefund,
+  onEdit,
+  onRetrySync,
   updating,
+  isOnline,
 }: {
   order: Order
   onClose: () => void
   onMarkPaid: () => void
+  onRefund: () => void
+  onEdit: () => void
+  onRetrySync: () => void
   updating: boolean
-}) => (
-  <div className="fixed inset-0 z-40 flex justify-end bg-slate-900/50">
-    <div className="flex w-full max-w-md flex-col bg-white">
-      <div className="flex items-center justify-between border-b border-slate-200 p-4">
-        <div>
-          <p className="text-xs text-slate-500">Order</p>
-          <h3 className="text-lg font-bold">#{order.orderNumber}</h3>
+  isOnline: boolean
+}) => {
+  const pendingSync = isPendingSync(order)
+
+  const canMarkPaid =
+    order.orderSource === 'kiosk' &&
+    order.paymentMethod === 'cash' &&
+    order.paymentStatus === 'pending' &&
+    order.status === 'pending' &&
+    isOnline
+
+  const canRefund =
+    order.status === 'completed' &&
+    order.paymentStatus === 'paid' &&
+    !pendingSync &&
+    isOnline
+
+  const canEdit =
+    canEditCashPosOrder(order) && (pendingSync || isOnline)
+
+  return (
+    <div className="fixed inset-0 z-40 flex justify-end bg-slate-900/50">
+      <div className="flex w-full max-w-md flex-col bg-white">
+        <div className="flex items-center justify-between border-b border-slate-200 p-4">
+          <div>
+            <p className="text-xs text-slate-500">Order</p>
+            <h3 className="text-lg font-bold">#{formatOrderNumber(order.orderNumber)}</h3>
+          </div>
+          <button onClick={onClose} className="btn-ghost p-1">
+            <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth={1.8}>
+              <path d="M6 6l12 12M18 6L6 18" />
+            </svg>
+          </button>
         </div>
-        <button onClick={onClose} className="btn-ghost p-1">
-          <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth={1.8}>
-            <path d="M6 6l12 12M18 6L6 18" />
-          </svg>
-        </button>
-      </div>
-      <div className="flex-1 space-y-4 overflow-y-auto p-4 text-sm">
-        <div className="grid grid-cols-2 gap-2 rounded-lg bg-slate-50 p-3 text-xs">
-          <div>
-            <p className="text-slate-500">Date</p>
-            <p className="font-medium">{formatDateTime(order.createdAt)}</p>
-          </div>
-          <div>
-            <p className="text-slate-500">Cashier</p>
-            <p className="font-medium">{order.createdByName}</p>
-          </div>
-          {order.tableNumber && (
+        <div className="flex-1 space-y-4 overflow-y-auto p-4 text-sm">
+          <div className="grid grid-cols-2 gap-2 rounded-lg bg-slate-50 p-3 text-xs">
             <div>
-              <p className="text-slate-500">Table</p>
-              <p className="font-medium">{order.tableNumber}</p>
+              <p className="text-slate-500">Date</p>
+              <p className="font-medium">{formatDateTime(order.createdAt)}</p>
             </div>
-          )}
-          <div>
-            <p className="text-slate-500">Status</p>
-            <p className="font-medium">{order.status}</p>
+            <div>
+              <p className="text-slate-500">Cashier</p>
+              <p className="font-medium">{order.createdByName}</p>
+            </div>
+            {order.tableNumber && (
+              <div>
+                <p className="text-slate-500">Table</p>
+                <p className="font-medium">{order.tableNumber}</p>
+              </div>
+            )}
+            <div>
+              <p className="text-slate-500">Status</p>
+              <p className="font-medium">{order.status}</p>
+            </div>
+            <div>
+              <p className="text-slate-500">Payment</p>
+              <p className="font-medium">
+                {order.paymentStatus} ({order.paymentMethod.replace('_', ' ')})
+              </p>
+            </div>
+            {pendingSync && (
+              <div className="col-span-2">
+                <p className="text-slate-500">Sync</p>
+                <p className="font-medium">
+                  {order.syncStatus === 'error'
+                    ? `Failed${order.syncError ? `: ${order.syncError}` : ''}`
+                    : order.syncStatus === 'syncing'
+                      ? 'Syncing…'
+                      : 'Pending sync'}
+                </p>
+              </div>
+            )}
+            {order.refundedAt && (
+              <div className="col-span-2">
+                <p className="text-slate-500">Refunded</p>
+                <p className="font-medium">
+                  {formatDateTime(order.refundedAt)}
+                  {order.refundedByName ? ` by ${order.refundedByName}` : ''}
+                </p>
+              </div>
+            )}
           </div>
-          <div>
-            <p className="text-slate-500">Payment</p>
-            <p className="font-medium">
-              {order.paymentStatus} ({order.paymentMethod.replace('_', ' ')})
-            </p>
-          </div>
-        </div>
 
-        <div>
-          <h4 className="mb-2 text-sm font-semibold">Items</h4>
-          <ul className="divide-y divide-slate-100 rounded-lg border border-slate-200">
-            {order.items.map((it) => (
-              <li key={it.lineId} className="p-3">
-                <div className="flex justify-between">
-                  <span className="font-medium">
-                    {it.quantity} x {it.itemName}
-                  </span>
-                  <span className="font-bold">{formatMoney(it.lineTotal)}</span>
-                </div>
-                {(it.modifiers?.length ?? 0) > 0 && (
-                  <ul className="mt-1 pl-3 text-xs text-slate-500">
-                    {(it.modifiers ?? []).map((m, idx) => (
-                      <li key={idx}>+ {m.optionName}</li>
-                    ))}
-                  </ul>
-                )}
-                {it.note && (
-                  <p className="mt-1 pl-3 text-xs italic text-slate-400">"{it.note}"</p>
-                )}
-              </li>
+          <div>
+            <h4 className="mb-2 text-sm font-semibold">Items</h4>
+            <ul className="divide-y divide-slate-100 rounded-lg border border-slate-200">
+              {order.items.map((it) => (
+                <li key={it.lineId} className="p-3">
+                  <div className="flex justify-between">
+                    <span className="font-medium">
+                      {it.quantity} x {it.itemName}
+                    </span>
+                    <span className="font-bold">{formatMoney(it.lineTotal)}</span>
+                  </div>
+                  {(it.modifiers?.length ?? 0) > 0 && (
+                    <ul className="mt-1 pl-3 text-xs text-slate-500">
+                      {(it.modifiers ?? []).map((m, idx) => (
+                        <li key={idx}>+ {m.optionName}</li>
+                      ))}
+                    </ul>
+                  )}
+                  {it.note && (
+                    <p className="mt-1 pl-3 text-xs italic text-slate-400">"{it.note}"</p>
+                  )}
+                </li>
+              ))}
+            </ul>
+          </div>
+
+          <div className="space-y-1 rounded-lg bg-slate-50 p-3 text-sm">
+            <div className="flex justify-between text-slate-600">
+              <span>Subtotal</span>
+              <span>{formatMoney(order.subtotal)}</span>
+            </div>
+            {order.discount.amount > 0 && (
+              <div className="flex justify-between text-emerald-700">
+                <span>Discount</span>
+                <span>-{formatMoney(order.discount.amount)}</span>
+              </div>
+            )}
+            {(order.taxLines ?? []).map((line) => (
+              <div
+                key={`${line.name}-${line.rate}`}
+                className="flex justify-between text-slate-600"
+              >
+                <span>
+                  {line.name} ({Math.round(line.rate * 10000) / 100}%)
+                </span>
+                <span>{formatMoney(line.amount)}</span>
+              </div>
             ))}
-          </ul>
-        </div>
-
-        <div className="space-y-1 rounded-lg bg-slate-50 p-3 text-sm">
-          <div className="flex justify-between text-slate-600">
-            <span>Subtotal</span>
-            <span>{formatMoney(order.subtotal)}</span>
-          </div>
-          {order.discount.amount > 0 && (
-            <div className="flex justify-between text-emerald-700">
-              <span>Discount</span>
-              <span>-{formatMoney(order.discount.amount)}</span>
+            {!(order.taxLines && order.taxLines.length > 0) &&
+              order.tax != null &&
+              order.tax > 0 && (
+                <div className="flex justify-between text-slate-600">
+                  <span>Tax</span>
+                  <span>{formatMoney(order.tax)}</span>
+                </div>
+              )}
+            {order.tip != null && order.tip > 0 && (
+              <div className="flex justify-between text-slate-600">
+                <span>Tip</span>
+                <span>{formatMoney(order.tip)}</span>
+              </div>
+            )}
+            <div className="flex justify-between border-t border-slate-200 pt-1 text-base font-bold">
+              <span>Total</span>
+              <span>{formatMoney(order.total)}</span>
             </div>
-          )}
-          <div className="flex justify-between border-t border-slate-200 pt-1 text-base font-bold">
-            <span>Total</span>
-            <span>{formatMoney(order.total)}</span>
+            {order.paymentMethod === 'cash' && (
+              <>
+                <div className="flex justify-between text-xs text-slate-500">
+                  <span>Cash</span>
+                  <span>{formatMoney(order.cashReceived ?? 0)}</span>
+                </div>
+                <div className="flex justify-between text-xs text-slate-500">
+                  <span>Change</span>
+                  <span>{formatMoney(order.change ?? 0)}</span>
+                </div>
+              </>
+            )}
+            {order.paymentMethod !== 'cash' && (
+              <div className="flex justify-between text-xs text-slate-500">
+                <span>Payment</span>
+                <span className="capitalize">{order.paymentMethod.replace('_', ' ')}</span>
+              </div>
+            )}
           </div>
-          {order.paymentMethod === 'cash' && (
+
+          {order.discount.amount > 0 && order.discount.appliedByName && (
+            <p className="text-xs text-slate-500">
+              Discount applied by <b>{order.discount.appliedByName}</b>
+              {order.discount.at && <> on {formatDateTime(order.discount.at)}</>}
+            </p>
+          )}
+        </div>
+        <div className="space-y-2 border-t border-slate-200 p-4">
+          {canMarkPaid ? (
+            <button
+              onClick={onMarkPaid}
+              className="btn-primary w-full"
+              disabled={updating}
+            >
+              {updating ? 'Completing...' : 'Mark Paid & Complete'}
+            </button>
+          ) : (
             <>
-              <div className="flex justify-between text-xs text-slate-500">
-                <span>Cash</span>
-                <span>{formatMoney(order.cashReceived ?? 0)}</span>
-              </div>
-              <div className="flex justify-between text-xs text-slate-500">
-                <span>Change</span>
-                <span>{formatMoney(order.change ?? 0)}</span>
-              </div>
+              <Link
+                to={`/admin/receipt/${order.id}`}
+                className="btn-primary w-full"
+                onClick={onClose}
+              >
+                Open Receipt
+              </Link>
+              {pendingSync && (
+                <button
+                  onClick={onRetrySync}
+                  className="btn-secondary w-full"
+                  disabled={updating || !isOnline}
+                >
+                  {updating ? 'Syncing…' : 'Retry sync'}
+                </button>
+              )}
+              {canEdit && (
+                <button
+                  onClick={onEdit}
+                  className="btn-secondary w-full"
+                  disabled={updating}
+                >
+                  Edit Order
+                </button>
+              )}
+              {canRefund && (
+                <button
+                  onClick={onRefund}
+                  className="btn-danger w-full"
+                  disabled={updating}
+                >
+                  Refund
+                </button>
+              )}
             </>
           )}
-          {order.paymentMethod !== 'cash' && (
-            <div className="flex justify-between text-xs text-slate-500">
-              <span>Payment</span>
-              <span className="capitalize">{order.paymentMethod.replace('_', ' ')}</span>
-            </div>
-          )}
         </div>
-
-        {order.discount.amount > 0 && order.discount.appliedByName && (
-          <p className="text-xs text-slate-500">
-            Discount applied by <b>{order.discount.appliedByName}</b>
-            {order.discount.at && <> on {formatDateTime(order.discount.at)}</>}
-          </p>
-        )}
-      </div>
-      <div className="border-t border-slate-200 p-4">
-        {order.orderSource === 'kiosk' &&
-        order.paymentMethod === 'cash' &&
-        order.paymentStatus === 'pending' &&
-        order.status === 'pending' ? (
-          <button
-            onClick={onMarkPaid}
-            className="btn-primary w-full"
-            disabled={updating}
-          >
-            {updating ? 'Completing...' : 'Mark Paid & Complete'}
-          </button>
-        ) : (
-          <Link
-            to={`/admin/receipt/${order.id}`}
-            className="btn-primary w-full"
-            onClick={onClose}
-          >
-            Open Receipt
-          </Link>
-        )}
       </div>
     </div>
-  </div>
-)
+  )
+}
 
 export default OrderHistoryPage

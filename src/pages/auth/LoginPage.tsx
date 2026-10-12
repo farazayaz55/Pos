@@ -6,6 +6,7 @@ import { z } from 'zod'
 import toast from 'react-hot-toast'
 import { useAuthStore } from '@/stores/authStore'
 import { useCompanyContextStore } from '@/stores/companyContextStore'
+import { defaultAdminPath } from '@/utils/permissions'
 
 const schema = z.object({
   email: z.string().email('Enter a valid email'),
@@ -28,7 +29,7 @@ const LoginPage = () => {
 
   useEffect(() => {
     if (user) {
-      if (user.role === 'admin' && user.companyId) {
+      if ((user.role === 'admin' || user.role === 'staff') && user.companyId) {
         setActiveCompany(user.companyId, false)
       }
     }
@@ -39,9 +40,7 @@ const LoginPage = () => {
     const target =
       from && from !== '/login'
         ? from
-        : user.role === 'super_admin'
-          ? '/super-admin'
-          : '/admin/pos'
+        : defaultAdminPath(user)
     return <Navigate to={target} replace />
   }
 

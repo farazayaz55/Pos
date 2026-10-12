@@ -3,8 +3,10 @@ import { Navigate, Route, Routes } from 'react-router-dom'
 import { useAuthStore } from '@/stores/authStore'
 import { useCompanyContextStore } from '@/stores/companyContextStore'
 import ProtectedRoute from '@/routes/ProtectedRoute'
+import PermissionGate from '@/routes/PermissionGate'
 import LoadingScreen from '@/components/common/LoadingScreen'
 import EmulatorBadge from '@/components/common/EmulatorBadge'
+import { defaultAdminPath } from '@/utils/permissions'
 
 import LoginPage from '@/pages/auth/LoginPage'
 
@@ -19,6 +21,8 @@ import CategoriesPage from '@/pages/admin/menu/CategoriesPage'
 import ItemsPage from '@/pages/admin/menu/ItemsPage'
 import ModifiersPage from '@/pages/admin/menu/ModifiersPage'
 import OrderHistoryPage from '@/pages/admin/orders/OrderHistoryPage'
+import SettingsPage from '@/pages/admin/settings/SettingsPage'
+import TeamPage from '@/pages/admin/team/TeamPage'
 
 import DisplayPage from '@/pages/display/DisplayPage'
 
@@ -36,7 +40,11 @@ const App = () => {
 
   useEffect(() => {
     if (!user) return
-    if (user.role === 'admin' && user.companyId && activeCompanyId !== user.companyId) {
+    if (
+      (user.role === 'admin' || user.role === 'staff') &&
+      user.companyId &&
+      activeCompanyId !== user.companyId
+    ) {
       setActiveCompany(user.companyId, false)
     }
   }, [user, activeCompanyId, setActiveCompany])
@@ -75,21 +83,87 @@ const App = () => {
       <Route
         path="/admin"
         element={
-          <ProtectedRoute allow={['super_admin', 'admin']}>
+          <ProtectedRoute allow={['super_admin', 'admin', 'staff']}>
             <AdminLayout />
           </ProtectedRoute>
         }
       >
-        <Route index element={<Navigate to="pos" replace />} />
-        <Route path="pos" element={<PosPage />} />
-        <Route path="receipt/:orderId" element={<ReceiptPage />} />
-        <Route path="menu/categories" element={<CategoriesPage />} />
-        <Route path="menu/items" element={<ItemsPage />} />
-        <Route path="menu/modifiers" element={<ModifiersPage />} />
-        <Route path="orders" element={<OrderHistoryPage />} />
+        <Route index element={<Navigate to={defaultAdminPath(user)} replace />} />
+        <Route
+          path="pos"
+          element={
+            <PermissionGate permission="pos">
+              <PosPage />
+            </PermissionGate>
+          }
+        />
+        <Route
+          path="receipt/:orderId"
+          element={
+            <PermissionGate permission="pos">
+              <ReceiptPage />
+            </PermissionGate>
+          }
+        />
+        <Route
+          path="menu/categories"
+          element={
+            <PermissionGate permission="menu">
+              <CategoriesPage />
+            </PermissionGate>
+          }
+        />
+        <Route
+          path="menu/items"
+          element={
+            <PermissionGate permission="menu">
+              <ItemsPage />
+            </PermissionGate>
+          }
+        />
+        <Route
+          path="menu/modifiers"
+          element={
+            <PermissionGate permission="menu">
+              <ModifiersPage />
+            </PermissionGate>
+          }
+        />
+        <Route
+          path="orders"
+          element={
+            <PermissionGate permission="orders">
+              <OrderHistoryPage />
+            </PermissionGate>
+          }
+        />
+        <Route
+          path="settings"
+          element={
+            <PermissionGate permission="settings">
+              <SettingsPage />
+            </PermissionGate>
+          }
+        />
+        <Route
+          path="team"
+          element={
+            <PermissionGate permission="team">
+              <TeamPage />
+            </PermissionGate>
+          }
+        />
       </Route>
 
-      <Route path="/" element={<Navigate to={user ? (user.role === 'super_admin' ? '/super-admin' : '/admin/pos') : '/login'} replace />} />
+      <Route
+        path="/"
+        element={
+          <Navigate
+            to={user ? defaultAdminPath(user) : '/login'}
+            replace
+          />
+        }
+      />
       <Route path="*" element={<Navigate to="/login" replace />} />
     </Routes>
     </>

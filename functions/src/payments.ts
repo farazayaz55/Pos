@@ -1,7 +1,7 @@
 /**
  * Stripe Terminal payments + kiosk order creation.
  *
- * Three callable HTTPS Cloud Functions:
+ * Callable HTTPS Cloud Functions:
  *
  *  - getTerminalConnectionToken: mints a connection token so the kiosk's
  *    mek_stripe_terminal SDK can initialise the Stripe Terminal session.
@@ -15,8 +15,9 @@
  *    PaymentIntent succeeded. The function re-prices the order from the live
  *    RTDB menu (defence-in-depth against client tampering), confirms the
  *    PaymentIntent with Stripe (source of truth for "was the customer
- *    charged?"), runs the existing /counters/{companyId}/orderSeq
- *    transaction to mint the human-friendly order number, and writes the
+ *    charged?"), runs a transaction on
+ *    /counters/{companyId}/dailyOrderSeq/{YYYY-MM-DD} to mint the
+ *    human-friendly daily order number, and writes the
  *    /orders/{companyId}/{orderId} record using the Admin SDK (which
  *    bypasses RTDB rules — kiosk anonymous auth is intentionally NOT
  *    allowed to write orders directly).
@@ -24,9 +25,15 @@
  *  - getKioskOrder: lets authenticated kiosk clients read an order by id
  *    (RTDB rules deny direct order reads for anonymous kiosk auth).
  *
+ *  - refundOrder: full-order refund for company admins. Cash orders are
+ *    marked refunded in RTDB; card orders also create a Stripe refund on
+ *    the original PaymentIntent.
+ *
  *  Idempotency: callers MUST send an idempotencyKey. Both createKioskPaymentIntent
  *  and createKioskOrder are idempotent on (paymentIntentId or idempotencyKey)
  *  so a flaky network never produces a double charge or a duplicate order.
+ *  refundOrder is idempotent on already-refunded orders and uses a Stripe
+ *  idempotency key for card refunds.
  */
 
 import {
@@ -37,6 +44,7 @@ import {
 import { logger } from 'firebase-functions/v2'
 import * as admin from 'firebase-admin'
 import Stripe from 'stripe'
+import { businessDateUtc } from './businessDate'
 
 const db = admin.database()
 
@@ -61,6 +69,24 @@ const requireAuth = (req: CallableRequest<unknown>): string => {
     throw new HttpsError('unauthenticated', 'Sign-in required.')
   }
   return uid
+}
+
+const requireCompanyAdmin = (
+  req: CallableRequest<unknown>,
+  companyId: string,
+): string => {
+  const uid = requireAuth(req)
+  const role = req.auth?.token?.role
+  const tokenCompanyId = req.auth?.token?.companyId
+  if (role === 'super_admin') return uid
+  if (role === 'admin' && tokenCompanyId === companyId) return uid
+  if (role === 'staff' && tokenCompanyId === companyId) {
+    const permissions = req.auth?.token?.permissions as
+      | { pos?: boolean }
+      | undefined
+    if (permissions?.pos === true) return uid
+  }
+  throw new HttpsError('permission-denied', 'Company admin required.')
 }
 
 const assertCompanyActive = async (companyId: string): Promise<Company> => {
@@ -143,6 +169,87 @@ interface PricedLine {
 }
 
 const round2 = (n: number): number => Math.round(n * 100) / 100
+
+type TaxConditionType = 'always' | 'taxableBaseLte' | 'taxableBaseGt'
+
+interface TaxComponent {
+  id: string
+  name: string
+  rate: number
+  conditionType: TaxConditionType
+  conditionAmount?: number
+  active?: boolean
+  sortOrder?: number
+}
+
+interface OrderTaxLine {
+  name: string
+  rate: number
+  amount: number
+}
+
+const conditionMatches = (component: TaxComponent, taxableBase: number): boolean => {
+  switch (component.conditionType) {
+    case 'always':
+      return true
+    case 'taxableBaseLte':
+      return taxableBase <= Number(component.conditionAmount)
+    case 'taxableBaseGt':
+      return taxableBase > Number(component.conditionAmount)
+    default:
+      return false
+  }
+}
+
+const resolveTaxComponents = (
+  components: Record<string, TaxComponent> | null | undefined,
+  legacyTaxRate?: number,
+): TaxComponent[] => {
+  const list = components ? Object.values(components) : []
+  const active = list
+    .filter((c) => c && c.active !== false && Number(c.rate) > 0)
+    .sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0))
+  if (active.length > 0) return active
+  const rate = Number(legacyTaxRate)
+  if (rate > 0) {
+    return [
+      {
+        id: 'legacy',
+        name: 'Tax',
+        rate,
+        conditionType: 'always',
+        active: true,
+        sortOrder: 0,
+      },
+    ]
+  }
+  return []
+}
+
+const calcTax = (
+  taxableBase: number,
+  components: TaxComponent[],
+): { tax: number; taxLines: OrderTaxLine[] } => {
+  const base = Math.max(0, taxableBase)
+  const taxLines: OrderTaxLine[] = []
+  for (const c of components) {
+    if (!conditionMatches(c, base)) continue
+    const amount = round2(base * Number(c.rate))
+    if (amount <= 0) continue
+    taxLines.push({ name: c.name, rate: Number(c.rate), amount })
+  }
+  const tax = round2(taxLines.reduce((s, l) => s + l.amount, 0))
+  return { tax, taxLines }
+}
+
+const loadCompanyTaxComponents = async (
+  companyId: string,
+  legacyTaxRate?: number,
+): Promise<TaxComponent[]> => {
+  const snap = await db.ref(`taxSettings/${companyId}`).get()
+  const settings = snap.val() as { components?: Record<string, TaxComponent> } | null
+  return resolveTaxComponents(settings?.components, legacyTaxRate)
+}
 
 const sanitizeQty = (q: unknown): number => {
   const n = Math.floor(Number(q))
@@ -403,7 +510,6 @@ export const createKioskOrder = onCall<
   // descriptive message to the client.
   try {
     const company = await assertCompanyActive(companyId)
-    const taxRate = Number(company.taxRate) > 0 ? Number(company.taxRate) : 0
     const tip = round2(Math.max(0, Number(tipAmount) || 0))
 
     const dedupeKey = isCash ? idempotencyKey : paymentIntentId
@@ -425,7 +531,8 @@ export const createKioskOrder = onCall<
     }
 
     const { lines: pricedLines, subtotal } = await priceLines(companyId, lines)
-    const tax = round2(subtotal * taxRate)
+    const taxComponents = await loadCompanyTaxComponents(companyId, company.taxRate)
+    const { tax, taxLines } = calcTax(subtotal, taxComponents)
     const total = round2(subtotal + tax + tip)
     const totalInCents = Math.round(total * 100)
 
@@ -453,7 +560,8 @@ export const createKioskOrder = onCall<
       }
     }
 
-    const counterRef = db.ref(`counters/${companyId}/orderSeq`)
+    const orderDate = businessDateUtc()
+    const counterRef = db.ref(`counters/${companyId}/dailyOrderSeq/${orderDate}`)
     const txn = await counterRef.transaction((current) => (current ?? 0) + 1)
     if (!txn.committed) {
       throw new HttpsError('aborted', 'Failed to mint order number.')
@@ -478,11 +586,13 @@ export const createKioskOrder = onCall<
 
     const order: OrderRecord = {
       orderNumber,
+      orderDate,
       companyId,
       items: itemsSnapshot,
       subtotal,
       discount: { type: 'none', value: 0, amount: 0 },
       tax,
+      ...(taxLines.length > 0 ? { taxLines } : {}),
       tip,
       total,
       paymentMethod,
@@ -532,7 +642,7 @@ interface GetKioskOrderResult {
   orderNumber: number
   total: number
   paymentMethod: 'cash' | 'card_reader' | 'tap_to_pay'
-  paymentStatus: 'pending' | 'paid'
+  paymentStatus: 'pending' | 'paid' | 'refunded'
   status: 'pending' | 'completed' | 'cancelled'
   items: unknown[]
   subtotal: number
@@ -573,17 +683,121 @@ export const getKioskOrder = onCall<GetKioskOrderInput, Promise<GetKioskOrderRes
   },
 )
 
+interface RefundOrderInput {
+  companyId: string
+  orderId: string
+}
+
+interface RefundOrderResult {
+  ok: true
+  alreadyRefunded: boolean
+  stripeRefundId?: string
+}
+
+export const refundOrder = onCall<RefundOrderInput, Promise<RefundOrderResult>>(
+  async (req) => {
+    const { companyId, orderId } = req.data || ({} as RefundOrderInput)
+    if (!companyId || typeof companyId !== 'string') {
+      throw new HttpsError('invalid-argument', 'companyId is required.')
+    }
+    if (!orderId || typeof orderId !== 'string') {
+      throw new HttpsError('invalid-argument', 'orderId is required.')
+    }
+
+    const uid = requireCompanyAdmin(req, companyId)
+    await assertCompanyActive(companyId)
+
+    const orderRef = db.ref(`orders/${companyId}/${orderId}`)
+    const snap = await orderRef.get()
+    const order = snap.val() as OrderRecord | null
+    if (!order) {
+      throw new HttpsError('not-found', 'Order not found.')
+    }
+
+    if (order.paymentStatus === 'refunded' || order.status === 'cancelled') {
+      return {
+        ok: true as const,
+        alreadyRefunded: true,
+        ...(order.stripeRefundId ? { stripeRefundId: order.stripeRefundId } : {}),
+      }
+    }
+
+    if (order.status !== 'completed' || order.paymentStatus !== 'paid') {
+      throw new HttpsError(
+        'failed-precondition',
+        'Only completed paid orders can be refunded.',
+      )
+    }
+
+    const isCard =
+      order.paymentMethod === 'card_reader' || order.paymentMethod === 'tap_to_pay'
+
+    let stripeRefundId: string | undefined
+    if (isCard) {
+      if (!order.stripePaymentIntentId) {
+        throw new HttpsError(
+          'failed-precondition',
+          'Card order is missing stripePaymentIntentId.',
+        )
+      }
+      try {
+        const stripe = stripeClient()
+        const refund = await stripe.refunds.create(
+          { payment_intent: order.stripePaymentIntentId },
+          { idempotencyKey: `refund_${companyId}_${orderId}` },
+        )
+        stripeRefundId = refund.id
+      } catch (err) {
+        if (err instanceof HttpsError) throw err
+        const msg = err instanceof Error ? err.message : String(err)
+        logger.error('[refundOrder] Stripe refund failed', {
+          companyId,
+          orderId,
+          paymentIntentId: order.stripePaymentIntentId,
+          message: msg,
+        })
+        throw new HttpsError('internal', `Stripe refund failed: ${msg}`)
+      }
+    }
+
+    const userSnap = await db.ref(`users/${uid}`).get()
+    const user = userSnap.val() as { name?: string } | null
+    const refundedByName = user?.name || 'Admin'
+    const now = Date.now()
+
+    const patch: Record<string, unknown> = {
+      status: 'cancelled',
+      paymentStatus: 'refunded',
+      refundedAt: now,
+      refundedBy: uid,
+      refundedByName,
+    }
+    if (stripeRefundId) patch.stripeRefundId = stripeRefundId
+
+    await orderRef.update(patch)
+
+    return {
+      ok: true as const,
+      alreadyRefunded: false,
+      ...(stripeRefundId ? { stripeRefundId } : {}),
+    }
+  },
+)
+
 interface OrderRecord {
   orderNumber: number
+  /** UTC calendar day (YYYY-MM-DD) the orderNumber was minted for. */
+  orderDate?: string
   companyId: string
   items: unknown[]
   subtotal: number
   discount: { type: 'none' | 'flat' | 'percent'; value: number; amount: number }
   tax?: number
+  taxLines?: OrderTaxLine[]
   tip?: number
   total: number
   paymentMethod: 'cash' | 'card_reader' | 'tap_to_pay'
-  paymentStatus: 'pending' | 'paid'
+  paymentStatus: 'pending' | 'paid' | 'refunded'
   status: 'pending' | 'completed' | 'cancelled'
   cashReceived?: number
   change?: number
@@ -595,5 +809,9 @@ interface OrderRecord {
   orderSource?: 'pos' | 'kiosk'
   stripePaymentIntentId?: string
   kioskIdempotencyKey?: string
+  refundedAt?: number
+  refundedBy?: string
+  refundedByName?: string
+  stripeRefundId?: string
   kds?: { status: 'queued' | 'in_progress' | 'ready' | 'served'; queuedAt: number }
 }

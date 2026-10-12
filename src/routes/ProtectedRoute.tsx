@@ -18,7 +18,12 @@ const ProtectedRoute = ({ children, allow }: Props) => {
     return <Navigate to="/login" replace state={{ from: location.pathname }} />
   }
   if (allow && !allow.includes(user.role)) {
-    const redirect = user.role === 'super_admin' ? '/super-admin' : '/admin/pos'
+    const redirect =
+      user.role === 'super_admin'
+        ? '/super-admin'
+        : user.role === 'admin' || user.role === 'staff'
+          ? '/admin/pos'
+          : '/login'
     return <Navigate to={redirect} replace />
   }
   return <>{children}</>

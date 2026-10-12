@@ -1,6 +1,10 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { useCartStore } from '@/stores/cartStore'
+import { useCompanyContextStore } from '@/stores/companyContextStore'
+import { useCompanyTaxSettings } from '@/hooks/useCompanyTaxSettings'
 import { formatMoney } from '@/utils/currency'
+import { formatOrderNumber } from '@/utils/businessDate'
+import { calcTax, calcTotal } from '@/utils/orderCalc'
 import { cn } from '@/utils/cn'
 
 interface Props {
@@ -8,6 +12,8 @@ interface Props {
 }
 
 const CartPanel = ({ onCheckout }: Props) => {
+  const companyId = useCompanyContextStore((s) => s.activeCompanyId) || ''
+  const { components } = useCompanyTaxSettings(companyId)
   const lines = useCartStore((s) => s.lines)
   const tableNumber = useCartStore((s) => s.tableNumber)
   const setTableNumber = useCartStore((s) => s.setTableNumber)
@@ -17,28 +23,48 @@ const CartPanel = ({ onCheckout }: Props) => {
   const updateLineQuantity = useCartStore((s) => s.updateLineQuantity)
   const removeLine = useCartStore((s) => s.removeLine)
   const clear = useCartStore((s) => s.clear)
+  const cancelEdit = useCartStore((s) => s.cancelEdit)
+  const editingOrderId = useCartStore((s) => s.editingOrderId)
+  const editingOrderNumber = useCartStore((s) => s.editingOrderNumber)
   const subtotal = useCartStore((s) => s.subtotal())
   const discountAmount = useCartStore((s) => s.discountAmount())
-  const total = useCartStore((s) => s.total())
+  const taxableBase = useCartStore((s) => s.taxableBase())
+
+  const { tax, taxLines } = useMemo(
+    () => calcTax(taxableBase, components),
+    [taxableBase, components],
+  )
+  const total = useMemo(() => calcTotal(taxableBase, tax), [taxableBase, tax])
 
   const [showDiscount, setShowDiscount] = useState(discountType !== 'none')
 
   const isEmpty = lines.length === 0
+  const isEditing = !!editingOrderId
 
   return (
     <div className="flex h-full flex-col">
       <div className="flex items-center justify-between border-b border-slate-200 px-4 py-3">
         <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-600">
-          Current Order
+          {isEditing ? `Editing #${formatOrderNumber(editingOrderNumber!)}` : 'Current Order'}
         </h2>
-        {!isEmpty && (
-          <button
-            onClick={() => clear()}
-            className="text-xs font-medium text-red-600 hover:underline"
-          >
-            Clear
-          </button>
-        )}
+        <div className="flex items-center gap-3">
+          {isEditing && (
+            <button
+              onClick={() => cancelEdit()}
+              className="text-xs font-medium text-slate-600 hover:underline"
+            >
+              Cancel edit
+            </button>
+          )}
+          {!isEmpty && (
+            <button
+              onClick={() => clear()}
+              className="text-xs font-medium text-red-600 hover:underline"
+            >
+              Clear
+            </button>
+          )}
+        </div>
       </div>
 
       <div className="border-b border-slate-200 px-4 py-3">
@@ -166,6 +192,20 @@ const CartPanel = ({ onCheckout }: Props) => {
               <span>-{formatMoney(discountAmount)}</span>
             </div>
           )}
+          {taxLines.map((line) => (
+            <div key={`${line.name}-${line.rate}`} className="flex justify-between text-slate-600">
+              <span>
+                {line.name} ({Math.round(line.rate * 10000) / 100}%)
+              </span>
+              <span>{formatMoney(line.amount)}</span>
+            </div>
+          ))}
+          {taxLines.length === 0 && tax > 0 && (
+            <div className="flex justify-between text-slate-600">
+              <span>Tax</span>
+              <span>{formatMoney(tax)}</span>
+            </div>
+          )}
           <div className="flex justify-between border-t border-slate-200 pt-2 text-base font-bold text-slate-900">
             <span>Total</span>
             <span>{formatMoney(total)}</span>
@@ -177,7 +217,7 @@ const CartPanel = ({ onCheckout }: Props) => {
           disabled={isEmpty}
           className="btn-primary mt-3 w-full"
         >
-          Place Order &rarr;
+          {isEditing ? 'Save Order →' : 'Place Order →'}
         </button>
       </div>
     </div>
