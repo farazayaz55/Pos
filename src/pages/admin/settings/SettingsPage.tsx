@@ -458,7 +458,7 @@ const SettingsPage = () => {
           <section>
             <h2 className="text-sm font-semibold text-slate-900">App updates</h2>
             <p className="mt-1 text-sm text-slate-500">
-              Desktop builds check GitHub Releases for new versions automatically.
+              Desktop builds check GitHub Releases automatically and prompt when an update is ready.
             </p>
             <dl className="mt-4 space-y-2 text-sm">
               <div className="flex justify-between gap-4">
