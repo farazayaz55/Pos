@@ -250,6 +250,9 @@ progress, and restart to install. A startup check also runs in the background.
 4. GitHub Actions (`.github/workflows/release-desktop.yml`) builds macOS + Windows and
    uploads installers plus `latest.yml` / `latest-mac.yml` to that release.
 
+Desktop CI embeds Firebase config from repository secrets (`VITE_FIREBASE_*`). Set those
+once under **Settings → Secrets and variables → Actions** (same values as local `.env`).
+
 Local publish (optional, requires `GH_TOKEN` with `repo` scope):
 
 ```bash
