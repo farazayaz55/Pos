@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from 'electron'
+import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron'
 
 export interface DesktopPrinter {
   name: string
@@ -12,6 +12,23 @@ export interface PrintOptions {
   deviceName?: string
 }
 
+export type UpdateStatus =
+  | 'idle'
+  | 'checking'
+  | 'available'
+  | 'not-available'
+  | 'downloading'
+  | 'downloaded'
+  | 'error'
+
+export interface UpdateEventPayload {
+  status: UpdateStatus
+  version: string
+  availableVersion?: string
+  progress?: number
+  error?: string
+}
+
 export interface PosDesktopApi {
   isDesktop: true
   getPrinters: () => Promise<DesktopPrinter[]>
@@ -20,6 +37,11 @@ export interface PosDesktopApi {
   openDisplay: (companyId: string) => Promise<void>
   /** Main-process fetch (bypasses renderer CORS) for offline image caching. */
   fetchBinary: (url: string) => Promise<{ contentType: string; data: ArrayBuffer }>
+  getAppVersion: () => Promise<string>
+  getUpdateStatus: () => Promise<UpdateEventPayload>
+  checkForUpdates: () => Promise<UpdateEventPayload>
+  installUpdate: () => Promise<{ success: boolean; error?: string }>
+  onUpdateEvent: (callback: (payload: UpdateEventPayload) => void) => () => void
 }
 
 const api: PosDesktopApi = {
@@ -29,6 +51,22 @@ const api: PosDesktopApi = {
   testPrint: (options) => ipcRenderer.invoke('pos:test-print', options ?? {}),
   openDisplay: (companyId) => ipcRenderer.invoke('pos:open-display', companyId),
   fetchBinary: (url) => ipcRenderer.invoke('pos:fetch-binary', url),
+  getAppVersion: async () => {
+    const status = await ipcRenderer.invoke('pos:updater-get-status')
+    return status.version as string
+  },
+  getUpdateStatus: () => ipcRenderer.invoke('pos:updater-get-status'),
+  checkForUpdates: () => ipcRenderer.invoke('pos:updater-check'),
+  installUpdate: () => ipcRenderer.invoke('pos:updater-install'),
+  onUpdateEvent: (callback) => {
+    const listener = (_event: IpcRendererEvent, payload: UpdateEventPayload) => {
+      callback(payload)
+    }
+    ipcRenderer.on('pos:updater-event', listener)
+    return () => {
+      ipcRenderer.removeListener('pos:updater-event', listener)
+    }
+  },
 }
 
 contextBridge.exposeInMainWorld('posDesktop', api)

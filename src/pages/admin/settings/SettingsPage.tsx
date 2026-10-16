@@ -9,10 +9,29 @@ import {
   componentsFromPreset,
   saveTaxSettings,
 } from '@/services/taxSettings'
-import type { DesktopPrinter } from '@/types/desktop'
+import type { DesktopPrinter, UpdateEventPayload, UpdateStatus } from '@/types/desktop'
 import type { TaxComponent, TaxConditionType } from '@/types'
 import { generateId } from '@/utils/idGen'
 import { cn } from '@/utils/cn'
+
+const updateStatusLabel = (status: UpdateStatus): string => {
+  switch (status) {
+    case 'checking':
+      return 'Checking for updates…'
+    case 'available':
+      return 'Update available — downloading…'
+    case 'not-available':
+      return 'You are up to date'
+    case 'downloading':
+      return 'Downloading update…'
+    case 'downloaded':
+      return 'Update ready — restart to install'
+    case 'error':
+      return 'Update check failed'
+    default:
+      return 'No update check yet'
+  }
+}
 
 const emptyComponent = (sortOrder: number): TaxComponent => ({
   id: generateId('tax'),
@@ -49,10 +68,56 @@ const SettingsPage = () => {
   const [savingTax, setSavingTax] = useState(false)
   const [taxDirty, setTaxDirty] = useState(false)
 
+  const [appVersion, setAppVersion] = useState('')
+  const [updateInfo, setUpdateInfo] = useState<UpdateEventPayload | null>(null)
+  const [checkingUpdate, setCheckingUpdate] = useState(false)
+  const [installingUpdate, setInstallingUpdate] = useState(false)
+
   useEffect(() => {
     setSelectedPrinter(receiptPrinterName ?? '')
     setAutoPrintLocal(autoPrint)
   }, [receiptPrinterName, autoPrint])
+
+  useEffect(() => {
+    if (!desktop || !window.posDesktop) return
+    let cancelled = false
+    const desktopApi = window.posDesktop
+
+    void (async () => {
+      try {
+        const [version, status] = await Promise.all([
+          desktopApi.getAppVersion(),
+          desktopApi.getUpdateStatus(),
+        ])
+        if (!cancelled) {
+          setAppVersion(version)
+          setUpdateInfo(status)
+        }
+      } catch {
+        // Updater unavailable in unexpected environments
+      }
+    })()
+
+    const unsubscribe = desktopApi.onUpdateEvent((payload) => {
+      if (cancelled) return
+      setUpdateInfo(payload)
+      setAppVersion(payload.version)
+      if (payload.status === 'available' && payload.availableVersion) {
+        toast.success(`Update ${payload.availableVersion} available`)
+      }
+      if (payload.status === 'downloaded' && payload.availableVersion) {
+        toast.success(`Update ${payload.availableVersion} ready to install`)
+      }
+      if (payload.status === 'error' && payload.error) {
+        toast.error(payload.error)
+      }
+    })
+
+    return () => {
+      cancelled = true
+      unsubscribe()
+    }
+  }, [desktop])
 
   useEffect(() => {
     if (taxDirty) return
@@ -124,6 +189,38 @@ const SettingsPage = () => {
       toast.error(err instanceof Error ? err.message : 'Failed to refresh printers')
     } finally {
       setLoadingPrinters(false)
+    }
+  }
+
+  const handleCheckForUpdates = async () => {
+    if (!window.posDesktop) return
+    setCheckingUpdate(true)
+    try {
+      const status = await window.posDesktop.checkForUpdates()
+      setUpdateInfo(status)
+      if (status.status === 'not-available') {
+        toast.success('You are up to date')
+      } else if (status.status === 'error' && status.error) {
+        toast.error(status.error)
+      }
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Update check failed')
+    } finally {
+      setCheckingUpdate(false)
+    }
+  }
+
+  const handleInstallUpdate = async () => {
+    if (!window.posDesktop) return
+    setInstallingUpdate(true)
+    try {
+      const result = await window.posDesktop.installUpdate()
+      if (!result.success) {
+        throw new Error(result.error || 'Install failed')
+      }
+    } catch (err) {
+      setInstallingUpdate(false)
+      toast.error(err instanceof Error ? err.message : 'Failed to install update')
     }
   }
 
@@ -364,6 +461,83 @@ const SettingsPage = () => {
           )}
         </section>
       </div>
+
+      {desktop && (
+        <div className="card space-y-4 p-6">
+          <section>
+            <h2 className="text-sm font-semibold text-slate-900">App updates</h2>
+            <p className="mt-1 text-sm text-slate-500">
+              Desktop builds check GitHub Releases for new versions automatically.
+            </p>
+            <dl className="mt-4 space-y-2 text-sm">
+              <div className="flex justify-between gap-4">
+                <dt className="text-slate-500">Installed version</dt>
+                <dd className="font-medium text-slate-900">{appVersion || '…'}</dd>
+              </div>
+              <div className="flex justify-between gap-4">
+                <dt className="text-slate-500">Status</dt>
+                <dd className="text-right text-slate-800">
+                  {updateInfo
+                    ? updateStatusLabel(updateInfo.status)
+                    : 'No update check yet'}
+                  {updateInfo?.status === 'downloading' &&
+                    updateInfo.progress != null &&
+                    ` (${updateInfo.progress}%)`}
+                  {updateInfo?.availableVersion &&
+                    (updateInfo.status === 'available' ||
+                      updateInfo.status === 'downloading' ||
+                      updateInfo.status === 'downloaded') && (
+                      <span className="mt-0.5 block text-xs text-slate-500">
+                        Version {updateInfo.availableVersion}
+                      </span>
+                    )}
+                  {updateInfo?.status === 'error' && updateInfo.error && (
+                    <span className="mt-0.5 block text-xs text-red-600">
+                      {updateInfo.error}
+                    </span>
+                  )}
+                </dd>
+              </div>
+            </dl>
+            {(updateInfo?.status === 'downloading' ||
+              updateInfo?.status === 'available') &&
+              updateInfo.progress != null && (
+                <div className="mt-3 h-2 overflow-hidden rounded-full bg-slate-100">
+                  <div
+                    className="h-full rounded-full bg-brand-600 transition-all"
+                    style={{ width: `${Math.min(100, Math.max(0, updateInfo.progress))}%` }}
+                  />
+                </div>
+              )}
+            <div className="mt-4 flex flex-wrap gap-3">
+              <button
+                type="button"
+                className="btn-secondary"
+                disabled={
+                  checkingUpdate ||
+                  updateInfo?.status === 'checking' ||
+                  updateInfo?.status === 'downloading'
+                }
+                onClick={() => void handleCheckForUpdates()}
+              >
+                {checkingUpdate || updateInfo?.status === 'checking'
+                  ? 'Checking…'
+                  : 'Check for updates'}
+              </button>
+              {updateInfo?.status === 'downloaded' && (
+                <button
+                  type="button"
+                  className="btn-primary"
+                  disabled={installingUpdate}
+                  onClick={() => void handleInstallUpdate()}
+                >
+                  {installingUpdate ? 'Restarting…' : 'Restart to update'}
+                </button>
+              )}
+            </div>
+          </section>
+        </div>
+      )}
 
       <div className="card space-y-6 p-6">
         <section>

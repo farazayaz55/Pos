@@ -235,9 +235,31 @@ Outputs to `release/`:
 - macOS: `.dmg` and `.zip`
 - Windows: NSIS `.exe` installer (x64)
 
+### Auto-updates (GitHub Releases)
+
+Packaged desktop apps use **electron-updater** against the
+[`farazayaz55/Pos`](https://github.com/farazayaz55/Pos) GitHub Releases feed.
+In **Admin → Settings → App updates**, staff can check for updates, see download
+progress, and restart to install. A startup check also runs in the background.
+
+**Cut a release:**
+
+1. Bump `"version"` in `package.json` (e.g. `0.1.1`).
+2. Commit the bump.
+3. Tag and push: `git tag v0.1.1 && git push origin v0.1.1` (tag must match `package.json`).
+4. GitHub Actions (`.github/workflows/release-desktop.yml`) builds macOS + Windows and
+   uploads installers plus `latest.yml` / `latest-mac.yml` to that release.
+
+Local publish (optional, requires `GH_TOKEN` with `repo` scope):
+
+```bash
+npm run electron:publish
+```
+
 **Code signing:** unsigned builds are fine for internal testing but show OS warnings
 (Gatekeeper / SmartScreen). For customer installs, sign with an Apple Developer ID and
-Windows Authenticode certificate.
+Windows Authenticode certificate. Signing is not required for the update channel itself
+on machines that already trust the installed app.
 
 The hosted web app (`npm run build` / `firebase deploy`) is unchanged and still uses the
 browser print dialog.
@@ -275,7 +297,7 @@ src/
       menu/                       # Categories, Items, Modifiers
       pos/                        # POS, Checkout modal, Receipt
       orders/OrderHistoryPage.tsx
-      settings/SettingsPage.tsx   # Printer picker + auto-print
+      settings/SettingsPage.tsx   # Printer picker, auto-print, app updates
     display/DisplayPage.tsx       # Public realtime menu
   utils/                          # currency, orderCalc, idGen, cn
   App.tsx, main.tsx, index.css
@@ -297,7 +319,7 @@ firebase.json
 - Kiosk mode and self-ordering
 - Multi-language menus
 - Reporting / analytics dashboards
-- Desktop auto-update channel
+- Desktop code signing / notarization (auto-update channel is live via GitHub Releases)
 
 Architecture is already designed for these: roles, order status, and payment method are
 typed enums, and all data is partitioned by `companyId`.

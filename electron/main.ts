@@ -6,12 +6,118 @@ import {
   net,
   type WebContentsPrintOptions,
 } from 'electron'
+import { autoUpdater } from 'electron-updater'
 import path from 'node:path'
 import fs from 'node:fs/promises'
 import { pathToFileURL } from 'node:url'
 
 const isDev = !app.isPackaged
 const SCHEME = 'app'
+
+type UpdateStatus =
+  | 'idle'
+  | 'checking'
+  | 'available'
+  | 'not-available'
+  | 'downloading'
+  | 'downloaded'
+  | 'error'
+
+type UpdateEventPayload = {
+  status: UpdateStatus
+  version: string
+  availableVersion?: string
+  progress?: number
+  error?: string
+}
+
+let updateStatus: UpdateStatus = 'idle'
+let availableVersion: string | undefined
+let downloadProgress: number | undefined
+let lastError: string | undefined
+
+const getUpdatePayload = (): UpdateEventPayload => ({
+  status: updateStatus,
+  version: app.getVersion(),
+  availableVersion,
+  progress: downloadProgress,
+  error: lastError,
+})
+
+const emitUpdateEvent = () => {
+  const payload = getUpdatePayload()
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (!win.isDestroyed()) {
+      win.webContents.send('pos:updater-event', payload)
+    }
+  }
+}
+
+const setUpdateStatus = (
+  status: UpdateStatus,
+  extras: Partial<Pick<UpdateEventPayload, 'availableVersion' | 'progress' | 'error'>> = {},
+) => {
+  updateStatus = status
+  if ('availableVersion' in extras) availableVersion = extras.availableVersion
+  if ('progress' in extras) downloadProgress = extras.progress
+  if ('error' in extras) lastError = extras.error
+  emitUpdateEvent()
+}
+
+const setupAutoUpdater = () => {
+  if (isDev) return
+
+  autoUpdater.autoDownload = true
+  autoUpdater.autoInstallOnAppQuit = true
+
+  autoUpdater.on('checking-for-update', () => {
+    setUpdateStatus('checking', { error: undefined })
+  })
+
+  autoUpdater.on('update-available', (info) => {
+    setUpdateStatus('available', {
+      availableVersion: info.version,
+      progress: 0,
+      error: undefined,
+    })
+  })
+
+  autoUpdater.on('update-not-available', () => {
+    setUpdateStatus('not-available', {
+      availableVersion: undefined,
+      progress: undefined,
+      error: undefined,
+    })
+  })
+
+  autoUpdater.on('download-progress', (progress) => {
+    setUpdateStatus('downloading', {
+      progress: Math.round(progress.percent),
+      error: undefined,
+    })
+  })
+
+  autoUpdater.on('update-downloaded', (info) => {
+    setUpdateStatus('downloaded', {
+      availableVersion: info.version,
+      progress: 100,
+      error: undefined,
+    })
+  })
+
+  autoUpdater.on('error', (err) => {
+    setUpdateStatus('error', {
+      error: err?.message || 'Update failed',
+    })
+  })
+
+  // Startup check after window is ready; UI listens via IPC events
+  setTimeout(() => {
+    void autoUpdater.checkForUpdates().catch((err: Error) => {
+      setUpdateStatus('error', { error: err?.message || 'Update check failed' })
+    })
+  }, 3000)
+}
 
 protocol.registerSchemesAsPrivileged([
   {
@@ -235,6 +341,38 @@ const registerIpc = () => {
       await displayWin.loadURL(`${SCHEME}://./display/${companyId}`)
     }
   })
+
+  ipcMain.handle('pos:updater-get-status', () => getUpdatePayload())
+
+  ipcMain.handle('pos:updater-check', async () => {
+    if (isDev) {
+      return {
+        ...getUpdatePayload(),
+        status: 'not-available' as const,
+        error: undefined,
+      }
+    }
+    try {
+      setUpdateStatus('checking', { error: undefined })
+      await autoUpdater.checkForUpdates()
+      return getUpdatePayload()
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Update check failed'
+      setUpdateStatus('error', { error: message })
+      return getUpdatePayload()
+    }
+  })
+
+  ipcMain.handle('pos:updater-install', () => {
+    if (isDev || updateStatus !== 'downloaded') {
+      return { success: false, error: 'No update ready to install' }
+    }
+    // Allow the IPC response to flush before quitting
+    setImmediate(() => {
+      autoUpdater.quitAndInstall(false, true)
+    })
+    return { success: true }
+  })
 }
 
 app.whenReady().then(() => {
@@ -243,6 +381,7 @@ app.whenReady().then(() => {
   }
   registerIpc()
   createWindow()
+  setupAutoUpdater()
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {

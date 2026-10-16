@@ -10,6 +10,23 @@ export interface PrintOptions {
   deviceName?: string
 }
 
+export type UpdateStatus =
+  | 'idle'
+  | 'checking'
+  | 'available'
+  | 'not-available'
+  | 'downloading'
+  | 'downloaded'
+  | 'error'
+
+export interface UpdateEventPayload {
+  status: UpdateStatus
+  version: string
+  availableVersion?: string
+  progress?: number
+  error?: string
+}
+
 export interface PosDesktopApi {
   isDesktop: true
   getPrinters: () => Promise<DesktopPrinter[]>
@@ -17,6 +34,11 @@ export interface PosDesktopApi {
   testPrint: (options?: PrintOptions) => Promise<{ success: boolean; error?: string }>
   openDisplay: (companyId: string) => Promise<void>
   fetchBinary: (url: string) => Promise<{ contentType: string; data: ArrayBuffer }>
+  getAppVersion: () => Promise<string>
+  getUpdateStatus: () => Promise<UpdateEventPayload>
+  checkForUpdates: () => Promise<UpdateEventPayload>
+  installUpdate: () => Promise<{ success: boolean; error?: string }>
+  onUpdateEvent: (callback: (payload: UpdateEventPayload) => void) => () => void
 }
 
 declare global {
