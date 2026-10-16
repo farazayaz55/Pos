@@ -142,7 +142,7 @@ const createWindow = () => {
     height: 800,
     minWidth: 1024,
     minHeight: 640,
-    show: false,
+    show: true,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -153,6 +153,7 @@ const createWindow = () => {
 
   mainWindow.once('ready-to-show', () => {
     mainWindow?.show()
+    mainWindow?.focus()
   })
 
   if (isDev) {
