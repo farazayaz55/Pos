@@ -6,6 +6,7 @@ import ProtectedRoute from '@/routes/ProtectedRoute'
 import PermissionGate from '@/routes/PermissionGate'
 import LoadingScreen from '@/components/common/LoadingScreen'
 import EmulatorBadge from '@/components/common/EmulatorBadge'
+import DesktopUpdateDialog from '@/components/common/DesktopUpdateDialog'
 import { defaultAdminPath } from '@/utils/permissions'
 
 import LoginPage from '@/pages/auth/LoginPage'
@@ -54,6 +55,7 @@ const App = () => {
       <>
         <LoadingScreen label="Starting up..." />
         <EmulatorBadge />
+        <DesktopUpdateDialog />
       </>
     )
   }
@@ -61,6 +63,7 @@ const App = () => {
   return (
     <>
       <EmulatorBadge />
+      <DesktopUpdateDialog />
     <Routes>
       <Route path="/login" element={<LoginPage />} />
 

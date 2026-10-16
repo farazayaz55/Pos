@@ -102,15 +102,6 @@ const SettingsPage = () => {
       if (cancelled) return
       setUpdateInfo(payload)
       setAppVersion(payload.version)
-      if (payload.status === 'available' && payload.availableVersion) {
-        toast.success(`Update ${payload.availableVersion} available`)
-      }
-      if (payload.status === 'downloaded' && payload.availableVersion) {
-        toast.success(`Update ${payload.availableVersion} ready to install`)
-      }
-      if (payload.status === 'error' && payload.error) {
-        toast.error(payload.error)
-      }
     })
 
     return () => {
