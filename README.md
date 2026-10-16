@@ -227,13 +227,21 @@ gcloud storage buckets update gs://servr-7d3f7.appspot.com --cors-file=storage-c
 ### Build installers
 
 ```bash
+# Builds for the current OS only (safe default)
 npm run electron:build
+
+# Explicit targets
+npm run electron:build:mac   # .dmg + .zip
+npm run electron:build:win   # NSIS .exe (x64) — run on Windows only
 ```
 
-Outputs to `release/`:
+Outputs to `release/`.
 
-- macOS: `.dmg` and `.zip`
-- Windows: NSIS `.exe` installer (x64)
+**Important:** Do **not** build the Windows NSIS installer on macOS (`electron-builder --win`
+from a Mac). Cross-built uninstallers fail NSIS integrity checks, so uninstall and in-place
+upgrade break. For Windows `.exe` artifacts, use a Windows machine, the
+`electronuserland/builder:wine` Docker image, or (preferred) cut a `v*` tag so
+GitHub Actions builds on `windows-latest`.
 
 ### Auto-updates (GitHub Releases)
 

@@ -1,7 +1,7 @@
 {
   "name": "pos-mvp",
   "private": true,
-  "version": "0.1.6",
+  "version": "0.1.7",
   "type": "module",
   "main": "electron-dist/main.js",
   "scripts": {
@@ -20,7 +20,9 @@
     "storage:cors": "gcloud storage buckets update gs://servr-7d3f7.firebasestorage.app --cors-file=storage-cors.json",
     "electron:compile": "tsc -p electron/tsconfig.json && node -e \"require('fs').writeFileSync('electron-dist/package.json', JSON.stringify({type:'commonjs'}))\"",
     "electron:dev": "npm run electron:compile && concurrently -k \"vite\" \"wait-on http://127.0.0.1:5174 && electron .\"",
-    "electron:build": "cross-env ELECTRON=true npm run build && npm run electron:compile && electron-builder --mac --win",
+    "electron:build": "cross-env ELECTRON=true npm run build && npm run electron:compile && electron-builder",
+    "electron:build:mac": "cross-env ELECTRON=true npm run build && npm run electron:compile && electron-builder --mac",
+    "electron:build:win": "cross-env ELECTRON=true npm run build && npm run electron:compile && electron-builder --win",
     "electron:publish": "cross-env ELECTRON=true npm run build && npm run electron:compile && electron-builder --publish always"
   },
   "build": {
@@ -61,7 +63,8 @@
     },
     "nsis": {
       "oneClick": false,
-      "allowToChangeInstallationDirectory": true
+      "allowToChangeInstallationDirectory": true,
+      "include": "build/installer.nsh"
     }
   },
   "dependencies": {
