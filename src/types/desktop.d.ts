@@ -8,6 +8,10 @@ export interface DesktopPrinter {
 
 export interface PrintOptions {
   deviceName?: string
+  /** Self-contained HTML document for a dedicated print window. */
+  html?: string
+  /** Optional page height in microns (fits thermal paper length). */
+  pageHeightMicrons?: number
 }
 
 export type UpdateStatus =

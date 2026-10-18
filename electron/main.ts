@@ -15,12 +15,19 @@ import { pathToFileURL } from 'node:url'
 const isDev = !app.isPackaged
 const SCHEME = 'app'
 
-/** 80mm thermal width; tall enough for a typical receipt (microns). */
-const RECEIPT_PAGE_SIZE = { width: 80000, height: 200000 } as const
+/** Default 80mm thermal page (microns). Height can be overridden per job. */
+const RECEIPT_PAGE_WIDTH_MICRONS = 80_000
+const RECEIPT_PAGE_HEIGHT_MICRONS_DEFAULT = 200_000
 const PRINT_CALLBACK_TIMEOUT_MS = 45_000
 const PRINT_WINDOW_DESTROY_DELAY_MS = 2_500
 
 type PrintResult = { success: boolean; error?: string }
+
+type SilentPrintOptions = {
+  deviceName?: string
+  /** Page height in microns (content-fitted when provided). */
+  pageHeightMicrons?: number
+}
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
 
@@ -28,12 +35,24 @@ const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve,
  * Windows silent print fails when Chromium gets an empty media size.
  * Always supply page size + no margins for receipt printers.
  */
-const buildPrintOptions = (deviceName?: string): WebContentsPrintOptions => ({
+const buildPrintOptions = ({
+  deviceName,
+  pageHeightMicrons,
+}: SilentPrintOptions = {}): WebContentsPrintOptions => ({
   silent: true,
   printBackground: true,
-  color: false,
+  color: true,
   margins: { marginType: 'none' },
-  pageSize: { ...RECEIPT_PAGE_SIZE },
+  pageSize: {
+    width: RECEIPT_PAGE_WIDTH_MICRONS,
+    height: Math.max(
+      50_000,
+      Math.min(
+        400_000,
+        Math.round(pageHeightMicrons || RECEIPT_PAGE_HEIGHT_MICRONS_DEFAULT),
+      ),
+    ),
+  },
   copies: 1,
   ...(deviceName ? { deviceName } : {}),
 })
@@ -107,12 +126,12 @@ const destroyLater = (win: BrowserWindow) => {
 
 const printHtmlDocument = async (
   html: string,
-  deviceName?: string,
+  options: SilentPrintOptions = {},
 ): Promise<PrintResult> => {
   const printWin = new BrowserWindow({
     show: false,
-    width: 320,
-    height: 800,
+    width: 302, // ~80mm at 96dpi
+    height: 900,
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
@@ -124,14 +143,19 @@ const printHtmlDocument = async (
       `data:text/html;charset=utf-8,${encodeURIComponent(html)}`,
     )
     // Let Chromium finish layout before starting the print job
-    await sleep(process.platform === 'win32' ? 500 : 200)
+    await sleep(process.platform === 'win32' ? 600 : 250)
 
-    const resolved = await resolveDeviceName(printWin.webContents, deviceName)
-    const result = await printWebContents(
+    const resolved = await resolveDeviceName(
       printWin.webContents,
-      buildPrintOptions(resolved),
+      options.deviceName,
     )
-    return result
+    return printWebContents(
+      printWin.webContents,
+      buildPrintOptions({
+        deviceName: resolved,
+        pageHeightMicrons: options.pageHeightMicrons,
+      }),
+    )
   } finally {
     // Destroying immediately on Windows often cancels the spooler job
     destroyLater(printWin)
@@ -356,7 +380,24 @@ const registerIpc = () => {
 
   ipcMain.handle(
     'pos:print',
-    async (event, options: { deviceName?: string } = {}) => {
+    async (
+      event,
+      options: {
+        deviceName?: string
+        html?: string
+        pageHeightMicrons?: number
+      } = {},
+    ) => {
+      // Prefer a self-contained receipt HTML document. Printing the live
+      // admin UI on Windows often yields a blank (white) page because of
+      // @media print visibility tricks + Chromium's silent print path.
+      if (typeof options.html === 'string' && options.html.trim()) {
+        return printHtmlDocument(options.html, {
+          deviceName: options.deviceName,
+          pageHeightMicrons: options.pageHeightMicrons,
+        })
+      }
+
       const webContents = event.sender
       if (webContents.isDestroyed()) {
         return { success: false, error: 'No window available to print' }
@@ -366,11 +407,13 @@ const registerIpc = () => {
         webContents,
         options.deviceName,
       )
-      if (options.deviceName && !resolved) {
-        return { success: false, error: 'Printer not found' }
-      }
-
-      return printWebContents(webContents, buildPrintOptions(resolved))
+      return printWebContents(
+        webContents,
+        buildPrintOptions({
+          deviceName: resolved,
+          pageHeightMicrons: options.pageHeightMicrons,
+        }),
+      )
     },
   )
 
@@ -383,12 +426,12 @@ const registerIpc = () => {
 
       const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Test</title>
 <style>
-  @page { size: 80mm 200mm; margin: 0; }
-  html, body { width: 80mm; margin: 0; padding: 0; background: #fff; color: #111; }
-  body { font-family: ui-monospace, Consolas, monospace; font-size: 12px; padding: 8px 10px; box-sizing: border-box; }
-  h1 { font-size: 14px; text-align: center; margin: 0 0 8px; }
-  p { margin: 4px 0; text-align: center; }
-  hr { border: none; border-top: 1px dashed #999; margin: 12px 0; }
+  @page { size: 80mm 80mm; margin: 0; }
+  html, body { width: 80mm; margin: 0; padding: 0; background: #fff; color: #000; }
+  body { font-family: Consolas, "Courier New", monospace; font-size: 12px; padding: 8px 10px; box-sizing: border-box; }
+  h1 { font-size: 14px; text-align: center; margin: 0 0 8px; color: #000; }
+  p { margin: 4px 0; text-align: center; color: #000; }
+  hr { border: none; border-top: 1px dashed #000; margin: 12px 0; }
 </style></head><body>
   <h1>Restaurant POS</h1>
   <p>Printer test</p>
@@ -397,7 +440,10 @@ const registerIpc = () => {
   <p>If you can read this, the printer is configured correctly.</p>
 </body></html>`
 
-      return printHtmlDocument(html, options.deviceName)
+      return printHtmlDocument(html, {
+        deviceName: options.deviceName,
+        pageHeightMicrons: 80_000,
+      })
     },
   )
 
