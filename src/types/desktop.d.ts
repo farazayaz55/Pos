@@ -8,8 +8,10 @@ export interface DesktopPrinter {
 
 export interface PrintOptions {
   deviceName?: string
-  /** Self-contained HTML document for a dedicated print window. */
+  /** Self-contained HTML document for a dedicated print window (macOS/Linux). */
   html?: string
+  /** Plain-text receipt for ESC/POS RAW printing (Windows POS printers). */
+  text?: string
   /** Optional page height in microns (fits thermal paper length). */
   pageHeightMicrons?: number
 }

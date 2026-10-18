@@ -11,11 +11,12 @@ import { autoUpdater } from 'electron-updater'
 import path from 'node:path'
 import fs from 'node:fs/promises'
 import { pathToFileURL } from 'node:url'
+import { buildEscPosReceipt, rawPrintWindows } from './escposPrint'
 
 const isDev = !app.isPackaged
 const SCHEME = 'app'
 
-/** 80mm thermal width (microns). */
+/** 80mm thermal width (microns) — used for macOS/Linux HTML print only. */
 const RECEIPT_PAGE_WIDTH_MICRONS = 80_000
 const RECEIPT_PAGE_HEIGHT_MICRONS_DEFAULT = 200_000
 const PRINT_CALLBACK_TIMEOUT_MS = 45_000
@@ -25,7 +26,9 @@ type PrintResult = { success: boolean; error?: string }
 
 type SilentPrintOptions = {
   deviceName?: string
-  /** Page height in microns (fitted to receipt content when provided). */
+  html?: string
+  /** Plain-text receipt body for ESC/POS (preferred on Windows). */
+  text?: string
   pageHeightMicrons?: number
 }
 
@@ -58,6 +61,15 @@ const resolveDeviceName = async (
   )
   if (ci) return ci.name
   return requested
+}
+
+const resolvePrinterFromApp = async (
+  requested?: string,
+): Promise<string | undefined> => {
+  const win =
+    BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0]
+  if (!win || win.isDestroyed()) return requested
+  return resolveDeviceName(win.webContents, requested)
 }
 
 const printWebContents = (
@@ -107,81 +119,35 @@ const destroyLater = (win: BrowserWindow) => {
   }, PRINT_WINDOW_DESTROY_DELAY_MS)
 }
 
-/**
- * Windows: Chromium silent webContents.print is broken for many POS-80 drivers
- * (empty page size / blank slips). Render HTML → PDF, then print via SumatraPDF
- * (pdf-to-printer), which matches how Chrome successfully prints.
- */
-const printPdfOnWindows = async (
-  pdfPath: string,
+const printEscPosOnWindows = async (
   printerName: string,
+  text: string,
 ): Promise<PrintResult> => {
   try {
-    // Lazy require so macOS/Linux builds don't load a Windows-only module at startup.
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { print } = require('pdf-to-printer') as {
-      print: (
-        pdf: string,
-        options?: {
-          printer?: string
-          silent?: boolean
-          scale?: 'noscale' | 'shrink' | 'fit'
-          monochrome?: boolean
-          copies?: number
-        },
-      ) => Promise<void>
-    }
-
-    await print(pdfPath, {
-      printer: printerName,
-      silent: true,
-      scale: 'noscale',
-      monochrome: true,
-      copies: 1,
-    })
+    const payload = buildEscPosReceipt(text)
+    await rawPrintWindows(printerName, payload)
     return { success: true }
   } catch (err) {
     return {
       success: false,
-      error: err instanceof Error ? err.message : 'PDF print failed',
+      error: err instanceof Error ? err.message : 'RAW print failed',
     }
   }
 }
 
-const measureContentHeightMicrons = async (
-  webContents: WebContents,
-  fallback?: number,
-): Promise<number> => {
-  try {
-    const contentHeightPx = await webContents.executeJavaScript(
-      `Math.max(document.body?.scrollHeight || 0, document.documentElement?.scrollHeight || 0, 120)`,
-    )
-    if (typeof contentHeightPx === 'number' && contentHeightPx > 0) {
-      return clampPageHeight(
-        Math.round(contentHeightPx * (25_400 / 96) * 1.15 + 10_000),
-      )
-    }
-  } catch {
-    // ignore
-  }
-  return clampPageHeight(fallback)
-}
-
-const printHtmlDocument = async (
+/** macOS/Linux: print HTML via Chromium (works there; broken for POS-80 on Windows). */
+const printHtmlOnUnix = async (
   html: string,
   options: SilentPrintOptions = {},
 ): Promise<PrintResult> => {
   const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`
   const tmpHtml = path.join(app.getPath('temp'), `pos-receipt-${id}.html`)
-  const tmpPdf = path.join(app.getPath('temp'), `pos-receipt-${id}.pdf`)
   await fs.writeFile(tmpHtml, html, 'utf8')
 
   const printWin = new BrowserWindow({
     show: false,
-    width: 302, // ~80mm at 96dpi
+    width: 302,
     height: 1200,
-    x: -20_000,
-    y: -20_000,
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
@@ -190,42 +156,11 @@ const printHtmlDocument = async (
 
   try {
     await printWin.loadFile(tmpHtml)
-    printWin.showInactive()
-    await sleep(process.platform === 'win32' ? 500 : 250)
-
-    const pageHeightMicrons = await measureContentHeightMicrons(
-      printWin.webContents,
-      options.pageHeightMicrons,
-    )
+    await sleep(250)
     const resolved = await resolveDeviceName(
       printWin.webContents,
       options.deviceName,
     )
-
-    if (!resolved && options.deviceName) {
-      return { success: false, error: `Printer not found: ${options.deviceName}` }
-    }
-
-    // --- Windows: PDF → SumatraPDF (reliable for POS-80) ---
-    if (process.platform === 'win32') {
-      if (!resolved) {
-        return { success: false, error: 'No printer selected' }
-      }
-      const pdfData = await printWin.webContents.printToPDF({
-        printBackground: true,
-        pageSize: {
-          width: RECEIPT_PAGE_WIDTH_MICRONS,
-          height: pageHeightMicrons,
-        },
-        margins: {
-          marginType: 'none',
-        },
-      })
-      await fs.writeFile(tmpPdf, pdfData)
-      return printPdfOnWindows(tmpPdf, resolved)
-    }
-
-    // --- macOS / Linux: webContents.print is usually fine ---
     return printWebContents(printWin.webContents, {
       silent: true,
       printBackground: true,
@@ -233,7 +168,7 @@ const printHtmlDocument = async (
       margins: { marginType: 'none' },
       pageSize: {
         width: RECEIPT_PAGE_WIDTH_MICRONS,
-        height: pageHeightMicrons,
+        height: clampPageHeight(options.pageHeightMicrons),
       },
       copies: 1,
       ...(resolved ? { deviceName: resolved } : {}),
@@ -245,12 +180,39 @@ const printHtmlDocument = async (
     }
   } finally {
     destroyLater(printWin)
-    // Delay cleanup so SumatraPDF can finish reading the file on Windows
     setTimeout(() => {
       void fs.unlink(tmpHtml).catch(() => {})
-      void fs.unlink(tmpPdf).catch(() => {})
-    }, PRINT_WINDOW_DESTROY_DELAY_MS + 1_000)
+    }, PRINT_WINDOW_DESTROY_DELAY_MS)
   }
+}
+
+const printDocument = async (
+  options: SilentPrintOptions = {},
+): Promise<PrintResult> => {
+  const resolved = await resolvePrinterFromApp(options.deviceName)
+  if (!resolved) {
+    return { success: false, error: 'No printer selected' }
+  }
+
+  // Windows POS-80: Chromium silent/PDF paths feed blank paper. Send ESC/POS RAW.
+  if (process.platform === 'win32') {
+    const text =
+      (options.text && options.text.trim()) ||
+      'Restaurant POS\nPrinter test\n\nIf you can read this, RAW printing works.'
+    return printEscPosOnWindows(resolved, text)
+  }
+
+  if (options.html && options.html.trim()) {
+    return printHtmlOnUnix(options.html, { ...options, deviceName: resolved })
+  }
+
+  const fallbackHtml = `<!DOCTYPE html><html><body style="font-family:monospace;font-size:12px;color:#000;padding:8px;white-space:pre-wrap">${(
+    options.text || 'Restaurant POS'
+  )
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')}</body></html>`
+  return printHtmlOnUnix(fallbackHtml, { ...options, deviceName: resolved })
 }
 
 type UpdateStatus =
@@ -472,29 +434,18 @@ const registerIpc = () => {
   ipcMain.handle(
     'pos:print',
     async (
-      event,
+      _event,
       options: {
         deviceName?: string
         html?: string
+        text?: string
         pageHeightMicrons?: number
       } = {},
     ) => {
-      // Prefer a self-contained receipt HTML document. Printing the live
-      // admin UI on Windows often yields a blank (white) page because of
-      // @media print visibility tricks + Chromium's silent print path.
-      if (typeof options.html === 'string' && options.html.trim()) {
-        return printHtmlDocument(options.html, {
-          deviceName: options.deviceName,
-          pageHeightMicrons: options.pageHeightMicrons,
-        })
-      }
-
-      // No HTML payload — print a minimal document instead of the live UI.
-      const fallbackHtml = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Print</title>
-<style>body{font-family:monospace;font-size:12px;color:#000;padding:8px}</style>
-</head><body><p>Nothing to print.</p></body></html>`
-      return printHtmlDocument(fallbackHtml, {
+      return printDocument({
         deviceName: options.deviceName,
+        html: options.html,
+        text: options.text,
         pageHeightMicrons: options.pageHeightMicrons,
       })
     },
@@ -507,22 +458,17 @@ const registerIpc = () => {
         return { success: false, error: 'No printer selected' }
       }
 
-      const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Test</title>
-<style>
-  html, body { margin: 0; padding: 0; background: #fff; color: #000; }
-  body { font-family: Consolas, "Courier New", monospace; font-size: 12px; padding: 8px 10px; box-sizing: border-box; max-width: 80mm; }
-  h1 { font-size: 14px; text-align: center; margin: 0 0 8px; color: #000; }
-  p { margin: 4px 0; text-align: center; color: #000; }
-  hr { border: none; border-top: 1px dashed #000; margin: 12px 0; }
-</style></head><body>
-  <h1>Restaurant POS</h1>
-  <p>Printer test</p>
-  <hr>
-  <p>${new Date().toLocaleString()}</p>
-  <p>If you can read this, the printer is configured correctly.</p>
-</body></html>`
+      const text = [
+        'Restaurant POS',
+        'Printer test',
+        '--------------------------------',
+        new Date().toLocaleString(),
+        '',
+        'If you can read this, the printer',
+        'is configured correctly.',
+      ].join('\n')
 
-      return printHtmlDocument(html, { deviceName: options.deviceName })
+      return printDocument({ deviceName: options.deviceName, text })
     },
   )
 

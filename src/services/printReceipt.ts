@@ -36,7 +36,6 @@ function inlineComputedStyles(sourceRoot: HTMLElement, targetRoot: HTMLElement) 
       const prop = computed.item(j)
       css += `${prop}:${computed.getPropertyValue(prop)};`
     }
-    // Force ink-friendly colors for thermal printers
     css += 'color:#000;background-color:transparent;box-shadow:none;'
     tgt.style.cssText = css
     tgt.removeAttribute('class')
@@ -48,6 +47,16 @@ function inlineComputedStyles(sourceRoot: HTMLElement, targetRoot: HTMLElement) 
   targetRoot.style.margin = '0'
   targetRoot.style.padding = '2mm 3mm'
   targetRoot.style.boxSizing = 'border-box'
+}
+
+function receiptToPlainText(receipt: HTMLElement): string {
+  // innerText preserves visual line breaks from the receipt layout
+  const text = (receipt.innerText || receipt.textContent || '')
+    .replace(/\u00a0/g, ' ')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+  return text
 }
 
 async function buildReceiptPrintHtml(receipt: HTMLElement): Promise<{
@@ -82,15 +91,9 @@ async function buildReceiptPrintHtml(receipt: HTMLElement): Promise<{
   const contentHeightPx = Math.max(receipt.scrollHeight, receipt.offsetHeight, 120)
   const pageHeightMicrons = Math.round(contentHeightPx * PX_TO_MICRONS * 1.2 + 8_000)
 
-  // Avoid @page size — on Windows, forced page size often blanks thermal output.
   const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Receipt</title>
 <style>
-  html, body {
-    margin: 0;
-    padding: 0;
-    background: #fff;
-    color: #000;
-  }
+  html, body { margin: 0; padding: 0; background: #fff; color: #000; }
   body {
     max-width: 80mm;
     -webkit-print-color-adjust: exact;
@@ -106,9 +109,9 @@ async function buildReceiptPrintHtml(receipt: HTMLElement): Promise<{
 
 /**
  * Print the receipt.
- * In Electron: silent print of a dedicated receipt HTML document (avoids blank
- * Windows pages from printing the full admin UI).
- * In the browser: falls back to window.print() (system dialog).
+ * Desktop Windows: ESC/POS RAW text (Chromium silent print is blank on POS-80).
+ * Desktop macOS: HTML print window.
+ * Browser: window.print().
  */
 export async function printReceipt(): Promise<void> {
   const desktop = window.posDesktop
@@ -129,13 +132,18 @@ export async function printReceipt(): Promise<void> {
     throw new Error('Receipt is not ready to print')
   }
 
-  // Let layout/paint settle before snapshotting styles/images
   await new Promise<void>((resolve) => {
     requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
   })
 
+  const text = receiptToPlainText(receipt)
   const { html, pageHeightMicrons } = await buildReceiptPrintHtml(receipt)
-  const result = await desktop.print({ deviceName, html, pageHeightMicrons })
+  const result = await desktop.print({
+    deviceName,
+    text,
+    html,
+    pageHeightMicrons,
+  })
   if (!result.success) {
     throw new Error(result.error || 'Print failed')
   }
