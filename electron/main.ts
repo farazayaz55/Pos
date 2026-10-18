@@ -15,28 +15,35 @@ import { pathToFileURL } from 'node:url'
 const isDev = !app.isPackaged
 const SCHEME = 'app'
 
-/** 80mm thermal hint for macOS/Linux (microns). Not used on Windows. */
+/** 80mm thermal width (microns). Required — omitting pageSize fails on Windows/Chromium. */
 const RECEIPT_PAGE_WIDTH_MICRONS = 80_000
 const RECEIPT_PAGE_HEIGHT_MICRONS_DEFAULT = 200_000
 const PRINT_CALLBACK_TIMEOUT_MS = 45_000
-const PRINT_WINDOW_DESTROY_DELAY_MS = 2_500
+const PRINT_WINDOW_DESTROY_DELAY_MS = 3_000
 
 type PrintResult = { success: boolean; error?: string }
 
 type SilentPrintOptions = {
   deviceName?: string
-  /** Page height in microns (non-Windows only). */
+  /** Page height in microns (fitted to receipt content when provided). */
   pageHeightMicrons?: number
 }
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
 
+const clampPageHeight = (pageHeightMicrons?: number) =>
+  Math.max(
+    60_000,
+    Math.min(
+      400_000,
+      Math.round(pageHeightMicrons || RECEIPT_PAGE_HEIGHT_MICRONS_DEFAULT),
+    ),
+  )
+
 /**
- * Build silent-print options.
- *
- * On Windows, do NOT force a custom micron pageSize — that often feeds paper
- * and reports success while printing a blank slip. Chrome works because it uses
- * the printer driver's configured paper; we match that by omitting pageSize.
+ * Silent print options for 80mm thermal (POS-80, etc.).
+ * Chromium requires a non-empty pageSize; without it Windows logs:
+ * "page size is empty; printable area is empty".
  */
 const buildPrintOptions = ({
   deviceName,
@@ -46,7 +53,11 @@ const buildPrintOptions = ({
     silent: true,
     printBackground: true,
     color: true,
-    margins: { marginType: 'default' },
+    margins: { marginType: 'none' },
+    pageSize: {
+      width: RECEIPT_PAGE_WIDTH_MICRONS,
+      height: clampPageHeight(pageHeightMicrons),
+    },
     copies: 1,
   }
 
@@ -54,19 +65,9 @@ const buildPrintOptions = ({
     options.deviceName = deviceName
   }
 
-  // Custom pageSize is fine on macOS; on Windows it blanks many thermal drivers.
-  if (process.platform !== 'win32') {
-    options.pageSize = {
-      width: RECEIPT_PAGE_WIDTH_MICRONS,
-      height: Math.max(
-        50_000,
-        Math.min(
-          400_000,
-          Math.round(pageHeightMicrons || RECEIPT_PAGE_HEIGHT_MICRONS_DEFAULT),
-        ),
-      ),
-    }
-    options.margins = { marginType: 'none' }
+  // Thermal heads are typically 203 DPI; wrong DPI can yield tiny/blank output.
+  if (process.platform === 'win32') {
+    options.dpi = { horizontal: 203, vertical: 203 }
   }
 
   return options
@@ -143,10 +144,20 @@ const printHtmlDocument = async (
   html: string,
   options: SilentPrintOptions = {},
 ): Promise<PrintResult> => {
+  // Hidden data: URLs often report "content size is empty" on Windows.
+  // Load a real temp file and show the window off-screen so layout runs.
+  const tmpHtml = path.join(
+    app.getPath('temp'),
+    `pos-receipt-${Date.now()}-${Math.random().toString(36).slice(2)}.html`,
+  )
+  await fs.writeFile(tmpHtml, html, 'utf8')
+
   const printWin = new BrowserWindow({
     show: false,
     width: 302, // ~80mm at 96dpi
-    height: 900,
+    height: 1200,
+    x: -20_000,
+    y: -20_000,
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
@@ -154,11 +165,23 @@ const printHtmlDocument = async (
   })
 
   try {
-    await printWin.loadURL(
-      `data:text/html;charset=utf-8,${encodeURIComponent(html)}`,
-    )
-    // Let Chromium finish layout before starting the print job
-    await sleep(process.platform === 'win32' ? 600 : 250)
+    await printWin.loadFile(tmpHtml)
+    // Off-screen show forces Chromium to compute content/printable metrics
+    printWin.showInactive()
+    await sleep(process.platform === 'win32' ? 800 : 300)
+
+    let pageHeightMicrons = options.pageHeightMicrons
+    try {
+      const contentHeightPx = await printWin.webContents.executeJavaScript(
+        `Math.max(document.body?.scrollHeight || 0, document.documentElement?.scrollHeight || 0, 120)`,
+      )
+      if (typeof contentHeightPx === 'number' && contentHeightPx > 0) {
+        // 96 CSS px ≈ 25400/96 microns
+        pageHeightMicrons = Math.round(contentHeightPx * (25_400 / 96) * 1.15 + 10_000)
+      }
+    } catch {
+      // keep caller / default height
+    }
 
     const resolved = await resolveDeviceName(
       printWin.webContents,
@@ -168,12 +191,13 @@ const printHtmlDocument = async (
       printWin.webContents,
       buildPrintOptions({
         deviceName: resolved,
-        pageHeightMicrons: options.pageHeightMicrons,
+        pageHeightMicrons,
       }),
     )
   } finally {
     // Destroying immediately on Windows often cancels the spooler job
     destroyLater(printWin)
+    void fs.unlink(tmpHtml).catch(() => {})
   }
 }
 
