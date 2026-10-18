@@ -15,11 +15,11 @@ import { pathToFileURL } from 'node:url'
 const isDev = !app.isPackaged
 const SCHEME = 'app'
 
-/** 80mm thermal width (microns). Required — omitting pageSize fails on Windows/Chromium. */
+/** 80mm thermal width (microns). */
 const RECEIPT_PAGE_WIDTH_MICRONS = 80_000
 const RECEIPT_PAGE_HEIGHT_MICRONS_DEFAULT = 200_000
 const PRINT_CALLBACK_TIMEOUT_MS = 45_000
-const PRINT_WINDOW_DESTROY_DELAY_MS = 3_000
+const PRINT_WINDOW_DESTROY_DELAY_MS = 2_500
 
 type PrintResult = { success: boolean; error?: string }
 
@@ -39,39 +39,6 @@ const clampPageHeight = (pageHeightMicrons?: number) =>
       Math.round(pageHeightMicrons || RECEIPT_PAGE_HEIGHT_MICRONS_DEFAULT),
     ),
   )
-
-/**
- * Silent print options for 80mm thermal (POS-80, etc.).
- * Chromium requires a non-empty pageSize; without it Windows logs:
- * "page size is empty; printable area is empty".
- */
-const buildPrintOptions = ({
-  deviceName,
-  pageHeightMicrons,
-}: SilentPrintOptions = {}): WebContentsPrintOptions => {
-  const options: WebContentsPrintOptions = {
-    silent: true,
-    printBackground: true,
-    color: true,
-    margins: { marginType: 'none' },
-    pageSize: {
-      width: RECEIPT_PAGE_WIDTH_MICRONS,
-      height: clampPageHeight(pageHeightMicrons),
-    },
-    copies: 1,
-  }
-
-  if (deviceName) {
-    options.deviceName = deviceName
-  }
-
-  // Thermal heads are typically 203 DPI; wrong DPI can yield tiny/blank output.
-  if (process.platform === 'win32') {
-    options.dpi = { horizontal: 203, vertical: 203 }
-  }
-
-  return options
-}
 
 /** Match saved name against OS printer name (Windows is picky / case-sensitive). */
 const resolveDeviceName = async (
@@ -140,16 +107,73 @@ const destroyLater = (win: BrowserWindow) => {
   }, PRINT_WINDOW_DESTROY_DELAY_MS)
 }
 
+/**
+ * Windows: Chromium silent webContents.print is broken for many POS-80 drivers
+ * (empty page size / blank slips). Render HTML → PDF, then print via SumatraPDF
+ * (pdf-to-printer), which matches how Chrome successfully prints.
+ */
+const printPdfOnWindows = async (
+  pdfPath: string,
+  printerName: string,
+): Promise<PrintResult> => {
+  try {
+    // Lazy require so macOS/Linux builds don't load a Windows-only module at startup.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { print } = require('pdf-to-printer') as {
+      print: (
+        pdf: string,
+        options?: {
+          printer?: string
+          silent?: boolean
+          scale?: 'noscale' | 'shrink' | 'fit'
+          monochrome?: boolean
+          copies?: number
+        },
+      ) => Promise<void>
+    }
+
+    await print(pdfPath, {
+      printer: printerName,
+      silent: true,
+      scale: 'noscale',
+      monochrome: true,
+      copies: 1,
+    })
+    return { success: true }
+  } catch (err) {
+    return {
+      success: false,
+      error: err instanceof Error ? err.message : 'PDF print failed',
+    }
+  }
+}
+
+const measureContentHeightMicrons = async (
+  webContents: WebContents,
+  fallback?: number,
+): Promise<number> => {
+  try {
+    const contentHeightPx = await webContents.executeJavaScript(
+      `Math.max(document.body?.scrollHeight || 0, document.documentElement?.scrollHeight || 0, 120)`,
+    )
+    if (typeof contentHeightPx === 'number' && contentHeightPx > 0) {
+      return clampPageHeight(
+        Math.round(contentHeightPx * (25_400 / 96) * 1.15 + 10_000),
+      )
+    }
+  } catch {
+    // ignore
+  }
+  return clampPageHeight(fallback)
+}
+
 const printHtmlDocument = async (
   html: string,
   options: SilentPrintOptions = {},
 ): Promise<PrintResult> => {
-  // Hidden data: URLs often report "content size is empty" on Windows.
-  // Load a real temp file and show the window off-screen so layout runs.
-  const tmpHtml = path.join(
-    app.getPath('temp'),
-    `pos-receipt-${Date.now()}-${Math.random().toString(36).slice(2)}.html`,
-  )
+  const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`
+  const tmpHtml = path.join(app.getPath('temp'), `pos-receipt-${id}.html`)
+  const tmpPdf = path.join(app.getPath('temp'), `pos-receipt-${id}.pdf`)
   await fs.writeFile(tmpHtml, html, 'utf8')
 
   const printWin = new BrowserWindow({
@@ -166,38 +190,66 @@ const printHtmlDocument = async (
 
   try {
     await printWin.loadFile(tmpHtml)
-    // Off-screen show forces Chromium to compute content/printable metrics
     printWin.showInactive()
-    await sleep(process.platform === 'win32' ? 800 : 300)
+    await sleep(process.platform === 'win32' ? 500 : 250)
 
-    let pageHeightMicrons = options.pageHeightMicrons
-    try {
-      const contentHeightPx = await printWin.webContents.executeJavaScript(
-        `Math.max(document.body?.scrollHeight || 0, document.documentElement?.scrollHeight || 0, 120)`,
-      )
-      if (typeof contentHeightPx === 'number' && contentHeightPx > 0) {
-        // 96 CSS px ≈ 25400/96 microns
-        pageHeightMicrons = Math.round(contentHeightPx * (25_400 / 96) * 1.15 + 10_000)
-      }
-    } catch {
-      // keep caller / default height
-    }
-
+    const pageHeightMicrons = await measureContentHeightMicrons(
+      printWin.webContents,
+      options.pageHeightMicrons,
+    )
     const resolved = await resolveDeviceName(
       printWin.webContents,
       options.deviceName,
     )
-    return printWebContents(
-      printWin.webContents,
-      buildPrintOptions({
-        deviceName: resolved,
-        pageHeightMicrons,
-      }),
-    )
+
+    if (!resolved && options.deviceName) {
+      return { success: false, error: `Printer not found: ${options.deviceName}` }
+    }
+
+    // --- Windows: PDF → SumatraPDF (reliable for POS-80) ---
+    if (process.platform === 'win32') {
+      if (!resolved) {
+        return { success: false, error: 'No printer selected' }
+      }
+      const pdfData = await printWin.webContents.printToPDF({
+        printBackground: true,
+        pageSize: {
+          width: RECEIPT_PAGE_WIDTH_MICRONS,
+          height: pageHeightMicrons,
+        },
+        margins: {
+          marginType: 'none',
+        },
+      })
+      await fs.writeFile(tmpPdf, pdfData)
+      return printPdfOnWindows(tmpPdf, resolved)
+    }
+
+    // --- macOS / Linux: webContents.print is usually fine ---
+    return printWebContents(printWin.webContents, {
+      silent: true,
+      printBackground: true,
+      color: true,
+      margins: { marginType: 'none' },
+      pageSize: {
+        width: RECEIPT_PAGE_WIDTH_MICRONS,
+        height: pageHeightMicrons,
+      },
+      copies: 1,
+      ...(resolved ? { deviceName: resolved } : {}),
+    })
+  } catch (err) {
+    return {
+      success: false,
+      error: err instanceof Error ? err.message : 'Print failed',
+    }
   } finally {
-    // Destroying immediately on Windows often cancels the spooler job
     destroyLater(printWin)
-    void fs.unlink(tmpHtml).catch(() => {})
+    // Delay cleanup so SumatraPDF can finish reading the file on Windows
+    setTimeout(() => {
+      void fs.unlink(tmpHtml).catch(() => {})
+      void fs.unlink(tmpPdf).catch(() => {})
+    }, PRINT_WINDOW_DESTROY_DELAY_MS + 1_000)
   }
 }
 
@@ -437,22 +489,14 @@ const registerIpc = () => {
         })
       }
 
-      const webContents = event.sender
-      if (webContents.isDestroyed()) {
-        return { success: false, error: 'No window available to print' }
-      }
-
-      const resolved = await resolveDeviceName(
-        webContents,
-        options.deviceName,
-      )
-      return printWebContents(
-        webContents,
-        buildPrintOptions({
-          deviceName: resolved,
-          pageHeightMicrons: options.pageHeightMicrons,
-        }),
-      )
+      // No HTML payload — print a minimal document instead of the live UI.
+      const fallbackHtml = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Print</title>
+<style>body{font-family:monospace;font-size:12px;color:#000;padding:8px}</style>
+</head><body><p>Nothing to print.</p></body></html>`
+      return printHtmlDocument(fallbackHtml, {
+        deviceName: options.deviceName,
+        pageHeightMicrons: options.pageHeightMicrons,
+      })
     },
   )
 
