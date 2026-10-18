@@ -26,6 +26,15 @@ export async function printReceipt(): Promise<void> {
     )
   }
 
+  if (!document.getElementById('receipt')) {
+    throw new Error('Receipt is not ready to print')
+  }
+
+  // Let layout/paint settle before Chromium snapshots for print (esp. Windows)
+  await new Promise<void>((resolve) => {
+    requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
+  })
+
   const result = await desktop.print({ deviceName })
   if (!result.success) {
     throw new Error(result.error || 'Print failed')

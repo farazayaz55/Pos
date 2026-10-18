@@ -163,7 +163,7 @@ const AdminLayout = () => {
     <div className="flex h-screen bg-slate-50">
       <aside
         className={cn(
-          'fixed inset-y-0 left-0 z-40 flex w-64 flex-col border-r border-slate-200 bg-white transition-transform md:static md:translate-x-0',
+          'no-print fixed inset-y-0 left-0 z-40 flex w-64 flex-col border-r border-slate-200 bg-white transition-transform md:static md:translate-x-0',
           sidebarOpen ? 'translate-x-0' : '-translate-x-full',
         )}
       >
@@ -250,7 +250,7 @@ const AdminLayout = () => {
 
       <div className="flex min-w-0 flex-1 flex-col">
         {isImpersonating && (
-          <div className="flex items-center justify-between gap-2 border-b border-amber-200 bg-amber-50 px-4 py-2 text-xs text-amber-900">
+          <div className="no-print flex items-center justify-between gap-2 border-b border-amber-200 bg-amber-50 px-4 py-2 text-xs text-amber-900">
             <span>
               Super Admin view: managing <b>{company?.name || 'this company'}</b>
             </span>
@@ -260,7 +260,7 @@ const AdminLayout = () => {
           </div>
         )}
 
-        <header className="flex items-center gap-3 border-b border-slate-200 bg-white px-4 py-2 md:hidden">
+        <header className="no-print flex items-center gap-3 border-b border-slate-200 bg-white px-4 py-2 md:hidden">
           <button
             className="btn-ghost p-2"
             onClick={() => setSidebarOpen((v) => !v)}

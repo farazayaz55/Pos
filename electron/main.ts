@@ -4,6 +4,7 @@ import {
   ipcMain,
   protocol,
   net,
+  type WebContents,
   type WebContentsPrintOptions,
 } from 'electron'
 import { autoUpdater } from 'electron-updater'
@@ -13,6 +14,129 @@ import { pathToFileURL } from 'node:url'
 
 const isDev = !app.isPackaged
 const SCHEME = 'app'
+
+/** 80mm thermal width; tall enough for a typical receipt (microns). */
+const RECEIPT_PAGE_SIZE = { width: 80000, height: 200000 } as const
+const PRINT_CALLBACK_TIMEOUT_MS = 45_000
+const PRINT_WINDOW_DESTROY_DELAY_MS = 2_500
+
+type PrintResult = { success: boolean; error?: string }
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
+
+/**
+ * Windows silent print fails when Chromium gets an empty media size.
+ * Always supply page size + no margins for receipt printers.
+ */
+const buildPrintOptions = (deviceName?: string): WebContentsPrintOptions => ({
+  silent: true,
+  printBackground: true,
+  color: false,
+  margins: { marginType: 'none' },
+  pageSize: { ...RECEIPT_PAGE_SIZE },
+  copies: 1,
+  ...(deviceName ? { deviceName } : {}),
+})
+
+/** Match saved name against OS printer name (Windows is picky / case-sensitive). */
+const resolveDeviceName = async (
+  webContents: WebContents,
+  requested?: string,
+): Promise<string | undefined> => {
+  if (!requested) return undefined
+  const printers = await webContents.getPrintersAsync()
+  const exact = printers.find((p) => p.name === requested)
+  if (exact) return exact.name
+  const byDisplay = printers.find((p) => p.displayName === requested)
+  if (byDisplay) return byDisplay.name
+  const lower = requested.toLowerCase()
+  const ci = printers.find(
+    (p) =>
+      p.name.toLowerCase() === lower || p.displayName.toLowerCase() === lower,
+  )
+  if (ci) return ci.name
+  return requested
+}
+
+const printWebContents = (
+  webContents: WebContents,
+  options: WebContentsPrintOptions,
+): Promise<PrintResult> =>
+  new Promise((resolve) => {
+    let settled = false
+    const finish = (result: PrintResult) => {
+      if (settled) return
+      settled = true
+      resolve(result)
+    }
+
+    const timer = setTimeout(() => {
+      finish({
+        success: false,
+        error:
+          'Print timed out. On Windows, confirm the printer name and that a paper size is set in printer properties.',
+      })
+    }, PRINT_CALLBACK_TIMEOUT_MS)
+
+    try {
+      webContents.print(options, (success, failureReason) => {
+        clearTimeout(timer)
+        if (success) {
+          finish({ success: true })
+        } else {
+          finish({
+            success: false,
+            error: failureReason || 'Print failed',
+          })
+        }
+      })
+    } catch (err) {
+      clearTimeout(timer)
+      finish({
+        success: false,
+        error: err instanceof Error ? err.message : 'Print failed',
+      })
+    }
+  })
+
+const destroyLater = (win: BrowserWindow) => {
+  setTimeout(() => {
+    if (!win.isDestroyed()) win.destroy()
+  }, PRINT_WINDOW_DESTROY_DELAY_MS)
+}
+
+const printHtmlDocument = async (
+  html: string,
+  deviceName?: string,
+): Promise<PrintResult> => {
+  const printWin = new BrowserWindow({
+    show: false,
+    width: 320,
+    height: 800,
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+  })
+
+  try {
+    await printWin.loadURL(
+      `data:text/html;charset=utf-8,${encodeURIComponent(html)}`,
+    )
+    // Let Chromium finish layout before starting the print job
+    await sleep(process.platform === 'win32' ? 500 : 200)
+
+    const resolved = await resolveDeviceName(printWin.webContents, deviceName)
+    const result = await printWebContents(
+      printWin.webContents,
+      buildPrintOptions(resolved),
+    )
+    return result
+  } finally {
+    // Destroying immediately on Windows often cancels the spooler job
+    destroyLater(printWin)
+  }
+}
 
 type UpdateStatus =
   | 'idle'
@@ -214,8 +338,11 @@ const registerIpc = () => {
     return { contentType, data }
   })
 
-  ipcMain.handle('pos:get-printers', async () => {
-    const win = BrowserWindow.getFocusedWindow() ?? mainWindow
+  ipcMain.handle('pos:get-printers', async (event) => {
+    const win =
+      BrowserWindow.fromWebContents(event.sender) ??
+      BrowserWindow.getFocusedWindow() ??
+      mainWindow
     if (!win) return []
     const printers = await win.webContents.getPrintersAsync()
     return printers.map((p) => ({
@@ -229,30 +356,21 @@ const registerIpc = () => {
 
   ipcMain.handle(
     'pos:print',
-    async (_event, options: { deviceName?: string } = {}) => {
-      const win = BrowserWindow.getFocusedWindow() ?? mainWindow
-      if (!win) {
+    async (event, options: { deviceName?: string } = {}) => {
+      const webContents = event.sender
+      if (webContents.isDestroyed()) {
         return { success: false, error: 'No window available to print' }
       }
 
-      const printOptions: WebContentsPrintOptions = {
-        silent: true,
-        printBackground: true,
-        deviceName: options.deviceName || undefined,
+      const resolved = await resolveDeviceName(
+        webContents,
+        options.deviceName,
+      )
+      if (options.deviceName && !resolved) {
+        return { success: false, error: 'Printer not found' }
       }
 
-      return new Promise<{ success: boolean; error?: string }>((resolve) => {
-        win.webContents.print(printOptions, (success, failureReason) => {
-          if (success) {
-            resolve({ success: true })
-          } else {
-            resolve({
-              success: false,
-              error: failureReason || 'Print failed',
-            })
-          }
-        })
-      })
+      return printWebContents(webContents, buildPrintOptions(resolved))
     },
   )
 
@@ -263,19 +381,11 @@ const registerIpc = () => {
         return { success: false, error: 'No printer selected' }
       }
 
-      const testWin = new BrowserWindow({
-        show: false,
-        width: 320,
-        height: 480,
-        webPreferences: {
-          contextIsolation: true,
-          nodeIntegration: false,
-        },
-      })
-
       const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Test</title>
 <style>
-  body { font-family: ui-monospace, monospace; font-size: 12px; margin: 16px; color: #111; }
+  @page { size: 80mm 200mm; margin: 0; }
+  html, body { width: 80mm; margin: 0; padding: 0; background: #fff; color: #111; }
+  body { font-family: ui-monospace, Consolas, monospace; font-size: 12px; padding: 8px 10px; box-sizing: border-box; }
   h1 { font-size: 14px; text-align: center; margin: 0 0 8px; }
   p { margin: 4px 0; text-align: center; }
   hr { border: none; border-top: 1px dashed #999; margin: 12px 0; }
@@ -287,36 +397,7 @@ const registerIpc = () => {
   <p>If you can read this, the printer is configured correctly.</p>
 </body></html>`
 
-      try {
-        await testWin.loadURL(
-          `data:text/html;charset=utf-8,${encodeURIComponent(html)}`,
-        )
-        // Give Chromium a beat to layout before printing
-        await new Promise((r) => setTimeout(r, 200))
-
-        const result = await new Promise<{ success: boolean; error?: string }>(
-          (resolve) => {
-            testWin.webContents.print(
-              {
-                silent: true,
-                printBackground: true,
-                deviceName: options.deviceName,
-              },
-              (success, failureReason) => {
-                if (success) resolve({ success: true })
-                else
-                  resolve({
-                    success: false,
-                    error: failureReason || 'Test print failed',
-                  })
-              },
-            )
-          },
-        )
-        return result
-      } finally {
-        testWin.destroy()
-      }
+      return printHtmlDocument(html, options.deviceName)
     },
   )
 

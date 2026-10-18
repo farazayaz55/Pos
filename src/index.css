@@ -53,11 +53,53 @@
   }
 }
 
+@page {
+  /* Fixed size — `auto` height is unreliable in Chromium/Windows print */
+  size: 80mm 200mm;
+  margin: 0;
+}
+
 @media print {
-  body {
+  html,
+  body,
+  #root {
+    width: 80mm;
+    height: auto !important;
+    min-height: 0 !important;
+    margin: 0;
+    padding: 0;
     background: white !important;
+    overflow: visible !important;
   }
-  .no-print {
+
+  .no-print,
+  aside {
     display: none !important;
+  }
+
+  /* Isolate receipt; keep layout out of the spooler page */
+  body * {
+    visibility: hidden;
+  }
+
+  #receipt,
+  #receipt * {
+    visibility: visible;
+  }
+
+  #receipt {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 80mm;
+    max-width: 80mm;
+    margin: 0;
+    padding: 2mm 3mm;
+    box-shadow: none;
+    overflow: visible;
+    box-sizing: border-box;
+    color: #111 !important;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
   }
 }
