@@ -458,14 +458,25 @@ const registerIpc = () => {
         return { success: false, error: 'No printer selected' }
       }
 
+      const width = 42
+      const center = (s: string) => {
+        const t = s.slice(0, width)
+        const pad = Math.max(0, Math.floor((width - t.length) / 2))
+        return `${' '.repeat(pad)}${t}`
+      }
+      const padLR = (left: string, right: string) => {
+        const spaces = Math.max(1, width - left.length - right.length)
+        return `${left}${' '.repeat(spaces)}${right}`
+      }
       const text = [
-        'Restaurant POS',
-        'Printer test',
-        '--------------------------------',
-        new Date().toLocaleString(),
-        '',
-        'If you can read this, the printer',
-        'is configured correctly.',
+        center('Restaurant POS'),
+        center('Printer test'),
+        '-'.repeat(width),
+        padLR('Date', new Date().toLocaleString()),
+        padLR('Status', 'OK'),
+        '-'.repeat(width),
+        center('If you can read this,'),
+        center('alignment is working.'),
       ].join('\n')
 
       return printDocument({ deviceName: options.deviceName, text })

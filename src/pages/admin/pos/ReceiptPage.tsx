@@ -50,10 +50,10 @@ const ReceiptPage = () => {
     })()
   }, [companyId, orderId])
 
-  const handlePrint = async () => {
+  const handlePrint = async (receiptOrder: Order) => {
     setPrinting(true)
     try {
-      await printReceipt()
+      await printReceipt({ order: receiptOrder, company })
     } catch (err) {
       if (err instanceof PrintConfigError) {
         toast.error(err.message)
@@ -69,7 +69,7 @@ const ReceiptPage = () => {
   useEffect(() => {
     if (!order || !autoPrint) return
     const t = setTimeout(() => {
-      void handlePrint()
+      void handlePrint(order)
     }, 350)
     return () => clearTimeout(t)
     // Print once when the receipt order loads (or autoPrint toggles on)
@@ -130,7 +130,7 @@ const ReceiptPage = () => {
             </button>
           )}
           <button
-            onClick={() => void handlePrint()}
+            onClick={() => void handlePrint(order)}
             className="btn-primary"
             disabled={printing}
           >

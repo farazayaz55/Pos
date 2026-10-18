@@ -1,4 +1,9 @@
 import { usePosSettingsStore } from '@/stores/posSettingsStore'
+import type { Order } from '@/types'
+import {
+  formatReceiptPlainText,
+  type ReceiptCompanyInfo,
+} from '@/utils/receiptText'
 
 export class PrintConfigError extends Error {
   constructor(message: string) {
@@ -49,16 +54,6 @@ function inlineComputedStyles(sourceRoot: HTMLElement, targetRoot: HTMLElement) 
   targetRoot.style.boxSizing = 'border-box'
 }
 
-function receiptToPlainText(receipt: HTMLElement): string {
-  // innerText preserves visual line breaks from the receipt layout
-  const text = (receipt.innerText || receipt.textContent || '')
-    .replace(/\u00a0/g, ' ')
-    .replace(/[ \t]+\n/g, '\n')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim()
-  return text
-}
-
 async function buildReceiptPrintHtml(receipt: HTMLElement): Promise<{
   html: string
   pageHeightMicrons: number
@@ -107,13 +102,18 @@ async function buildReceiptPrintHtml(receipt: HTMLElement): Promise<{
   return { html, pageHeightMicrons }
 }
 
+export type PrintReceiptInput = {
+  order: Order
+  company?: ReceiptCompanyInfo
+}
+
 /**
  * Print the receipt.
- * Desktop Windows: ESC/POS RAW text (Chromium silent print is blank on POS-80).
+ * Desktop Windows: ESC/POS RAW text laid out like the on-screen receipt.
  * Desktop macOS: HTML print window.
  * Browser: window.print().
  */
-export async function printReceipt(): Promise<void> {
+export async function printReceipt(input: PrintReceiptInput): Promise<void> {
   const desktop = window.posDesktop
   if (!desktop) {
     window.print()
@@ -136,7 +136,7 @@ export async function printReceipt(): Promise<void> {
     requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
   })
 
-  const text = receiptToPlainText(receipt)
+  const text = formatReceiptPlainText(input.order, input.company)
   const { html, pageHeightMicrons } = await buildReceiptPrintHtml(receipt)
   const result = await desktop.print({
     deviceName,
