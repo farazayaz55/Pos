@@ -3,7 +3,7 @@ dist
 dist-ssr
 electron-dist
 release
-.env
+# .env is tracked intentionally so the project can be cloned and run elsewhere.
 .env.local
 .env.*.local
 *.log

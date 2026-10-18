@@ -15,7 +15,7 @@ import { pathToFileURL } from 'node:url'
 const isDev = !app.isPackaged
 const SCHEME = 'app'
 
-/** Default 80mm thermal page (microns). Height can be overridden per job. */
+/** 80mm thermal hint for macOS/Linux (microns). Not used on Windows. */
 const RECEIPT_PAGE_WIDTH_MICRONS = 80_000
 const RECEIPT_PAGE_HEIGHT_MICRONS_DEFAULT = 200_000
 const PRINT_CALLBACK_TIMEOUT_MS = 45_000
@@ -25,37 +25,52 @@ type PrintResult = { success: boolean; error?: string }
 
 type SilentPrintOptions = {
   deviceName?: string
-  /** Page height in microns (content-fitted when provided). */
+  /** Page height in microns (non-Windows only). */
   pageHeightMicrons?: number
 }
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
 
 /**
- * Windows silent print fails when Chromium gets an empty media size.
- * Always supply page size + no margins for receipt printers.
+ * Build silent-print options.
+ *
+ * On Windows, do NOT force a custom micron pageSize — that often feeds paper
+ * and reports success while printing a blank slip. Chrome works because it uses
+ * the printer driver's configured paper; we match that by omitting pageSize.
  */
 const buildPrintOptions = ({
   deviceName,
   pageHeightMicrons,
-}: SilentPrintOptions = {}): WebContentsPrintOptions => ({
-  silent: true,
-  printBackground: true,
-  color: true,
-  margins: { marginType: 'none' },
-  pageSize: {
-    width: RECEIPT_PAGE_WIDTH_MICRONS,
-    height: Math.max(
-      50_000,
-      Math.min(
-        400_000,
-        Math.round(pageHeightMicrons || RECEIPT_PAGE_HEIGHT_MICRONS_DEFAULT),
+}: SilentPrintOptions = {}): WebContentsPrintOptions => {
+  const options: WebContentsPrintOptions = {
+    silent: true,
+    printBackground: true,
+    color: true,
+    margins: { marginType: 'default' },
+    copies: 1,
+  }
+
+  if (deviceName) {
+    options.deviceName = deviceName
+  }
+
+  // Custom pageSize is fine on macOS; on Windows it blanks many thermal drivers.
+  if (process.platform !== 'win32') {
+    options.pageSize = {
+      width: RECEIPT_PAGE_WIDTH_MICRONS,
+      height: Math.max(
+        50_000,
+        Math.min(
+          400_000,
+          Math.round(pageHeightMicrons || RECEIPT_PAGE_HEIGHT_MICRONS_DEFAULT),
+        ),
       ),
-    ),
-  },
-  copies: 1,
-  ...(deviceName ? { deviceName } : {}),
-})
+    }
+    options.margins = { marginType: 'none' }
+  }
+
+  return options
+}
 
 /** Match saved name against OS printer name (Windows is picky / case-sensitive). */
 const resolveDeviceName = async (
@@ -426,9 +441,8 @@ const registerIpc = () => {
 
       const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Test</title>
 <style>
-  @page { size: 80mm 80mm; margin: 0; }
-  html, body { width: 80mm; margin: 0; padding: 0; background: #fff; color: #000; }
-  body { font-family: Consolas, "Courier New", monospace; font-size: 12px; padding: 8px 10px; box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: #fff; color: #000; }
+  body { font-family: Consolas, "Courier New", monospace; font-size: 12px; padding: 8px 10px; box-sizing: border-box; max-width: 80mm; }
   h1 { font-size: 14px; text-align: center; margin: 0 0 8px; color: #000; }
   p { margin: 4px 0; text-align: center; color: #000; }
   hr { border: none; border-top: 1px dashed #000; margin: 12px 0; }
@@ -440,10 +454,7 @@ const registerIpc = () => {
   <p>If you can read this, the printer is configured correctly.</p>
 </body></html>`
 
-      return printHtmlDocument(html, {
-        deviceName: options.deviceName,
-        pageHeightMicrons: 80_000,
-      })
+      return printHtmlDocument(html, { deviceName: options.deviceName })
     },
   )
 

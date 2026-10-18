@@ -82,17 +82,17 @@ async function buildReceiptPrintHtml(receipt: HTMLElement): Promise<{
   const contentHeightPx = Math.max(receipt.scrollHeight, receipt.offsetHeight, 120)
   const pageHeightMicrons = Math.round(contentHeightPx * PX_TO_MICRONS * 1.2 + 8_000)
 
+  // Avoid @page size — on Windows, forced page size often blanks thermal output.
   const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Receipt</title>
 <style>
-  @page { margin: 0; }
   html, body {
     margin: 0;
     padding: 0;
-    width: 80mm;
     background: #fff;
     color: #000;
   }
   body {
+    max-width: 80mm;
     -webkit-print-color-adjust: exact;
     print-color-adjust: exact;
   }
