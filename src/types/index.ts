@@ -1,13 +1,68 @@
 export type UserRole = 'super_admin' | 'admin' | 'staff'
 
-export type StaffPermission = 'pos' | 'menu' | 'orders' | 'settings' | 'team'
+export type StaffPermission =
+  | 'pos'
+  | 'menu'
+  | 'orders'
+  | 'settings'
+  | 'receipt'
+  | 'team'
 
 export interface StaffPermissions {
   pos: boolean
   menu: boolean
   orders: boolean
   settings: boolean
+  receipt: boolean
   team: boolean
+}
+
+export type ReceiptAlign = 'left' | 'center' | 'right'
+
+export type ReceiptBlockType =
+  | 'text'
+  | 'logo'
+  | 'companyName'
+  | 'companyLocation'
+  | 'companyPhone'
+  | 'divider'
+  | 'orderNumber'
+  | 'date'
+  | 'table'
+  | 'cashier'
+  | 'lineItems'
+  | 'subtotal'
+  | 'discount'
+  | 'tax'
+  | 'tip'
+  | 'total'
+  | 'payment'
+  | 'thankYou'
+
+export interface ReceiptBlock {
+  id: string
+  type: ReceiptBlockType
+  text?: string
+  align?: ReceiptAlign
+  label?: string
+}
+
+/** @deprecated Prefer ReceiptBlock text entries in blocks. */
+export interface ReceiptTextLine {
+  id: string
+  text: string
+  align: ReceiptAlign
+}
+
+export interface CompanyReceiptSettings {
+  companyId: string
+  blocks: ReceiptBlock[]
+  /** @deprecated migrated on read into blocks */
+  headerLines?: ReceiptTextLine[]
+  /** @deprecated migrated on read into blocks */
+  footerLines?: ReceiptTextLine[]
+  updatedAt?: number
+  updatedBy?: string
 }
 
 export interface AppUser {

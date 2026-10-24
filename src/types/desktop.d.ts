@@ -6,6 +6,14 @@ export interface DesktopPrinter {
   status: number
 }
 
+export interface DesktopDisplayInfo {
+  id: number
+  label: string
+  width: number
+  height: number
+  isPrimary: boolean
+}
+
 export interface PrintOptions {
   deviceName?: string
   /** Self-contained HTML document for a dedicated print window (macOS/Linux). */
@@ -33,12 +41,46 @@ export interface UpdateEventPayload {
   error?: string
 }
 
+export type CustomerDisplayPhase = 'idle' | 'ordering' | 'thanks'
+
+export interface CustomerDisplayState {
+  phase: CustomerDisplayPhase
+  companyName?: string
+  companyLogoUrl?: string
+  tableNumber?: string
+  lines: {
+    lineId: string
+    itemName: string
+    quantity: number
+    lineTotal: number
+    modifiers: { optionName: string; priceAdjustment: number }[]
+    note?: string
+  }[]
+  subtotal: number
+  discountAmount: number
+  taxLines: { name: string; rate: number; amount: number }[]
+  tax: number
+  total: number
+  orderNumber?: number
+  thanksTotal?: number
+}
+
 export interface PosDesktopApi {
   isDesktop: true
   getPrinters: () => Promise<DesktopPrinter[]>
   print: (options?: PrintOptions) => Promise<{ success: boolean; error?: string }>
   testPrint: (options?: PrintOptions) => Promise<{ success: boolean; error?: string }>
   openDisplay: (companyId: string) => Promise<void>
+  getDisplays: () => Promise<DesktopDisplayInfo[]>
+  openCustomerDisplay: (options?: { displayId?: number | null }) => Promise<void>
+  closeCustomerDisplay: () => Promise<void>
+  identifyDisplays: () => Promise<void>
+  publishCustomerDisplay: (state: CustomerDisplayState) => Promise<void>
+  getCustomerDisplayState: () => Promise<CustomerDisplayState | null>
+  onCustomerDisplayState: (
+    callback: (state: CustomerDisplayState) => void,
+  ) => () => void
+  /** Main-process fetch (bypasses renderer CORS) for offline image caching. */
   fetchBinary: (url: string) => Promise<{ contentType: string; data: ArrayBuffer }>
   getAppVersion: () => Promise<string>
   getUpdateStatus: () => Promise<UpdateEventPayload>

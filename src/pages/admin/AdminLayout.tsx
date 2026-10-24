@@ -129,7 +129,12 @@ const AdminLayout = () => {
     { to: '/admin/settings', label: 'Settings', icon: ICON.settings, permission: 'settings' },
     { to: '/admin/team', label: 'Team', icon: ICON.team, permission: 'team' },
   ]
-  const items = allItems.filter((it) => can(user, it.permission))
+  const items = allItems.filter((it) => {
+    if (it.to === '/admin/settings') {
+      return can(user, 'settings') || can(user, 'receipt')
+    }
+    return can(user, it.permission)
+  })
 
   const handleSignOut = async () => {
     if (!isOnline) {

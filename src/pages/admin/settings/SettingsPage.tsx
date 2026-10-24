@@ -3,16 +3,49 @@ import toast from 'react-hot-toast'
 import { useAuthStore } from '@/stores/authStore'
 import { useCompanyContextStore } from '@/stores/companyContextStore'
 import { isDesktopApp, usePosSettingsStore } from '@/stores/posSettingsStore'
+import { useCompany } from '@/hooks/useCompany'
 import { useCompanyTaxSettings } from '@/hooks/useCompanyTaxSettings'
+import { useCompanyReceiptSettings } from '@/hooks/useCompanyReceiptSettings'
 import {
   CANADIAN_TAX_PRESETS,
   componentsFromPreset,
   saveTaxSettings,
 } from '@/services/taxSettings'
-import type { DesktopPrinter, UpdateEventPayload, UpdateStatus } from '@/types/desktop'
-import type { TaxComponent, TaxConditionType } from '@/types'
+import { saveReceiptSettings } from '@/services/receiptSettings'
+import type {
+  DesktopDisplayInfo,
+  DesktopPrinter,
+  UpdateEventPayload,
+  UpdateStatus,
+} from '@/types/desktop'
+import type {
+  ReceiptAlign,
+  ReceiptBlock,
+  ReceiptBlockType,
+  TaxComponent,
+  TaxConditionType,
+} from '@/types'
+import { can } from '@/utils/permissions'
 import { generateId } from '@/utils/idGen'
+import {
+  RECEIPT_BLOCK_LABELS,
+  RECEIPT_BLOCK_TYPES,
+  blockSupportsAlign,
+  blockSupportsLabel,
+  createReceiptBlock,
+  defaultReceiptBlocks,
+  resolveReceiptBlocks,
+} from '@/utils/receiptBlocks'
+import ReceiptDocument, {
+  SAMPLE_RECEIPT_ORDER,
+} from '@/components/receipt/ReceiptDocument'
 import { cn } from '@/utils/cn'
+
+const ALIGN_OPTIONS: { value: ReceiptAlign; label: string }[] = [
+  { value: 'left', label: 'Left' },
+  { value: 'center', label: 'Center' },
+  { value: 'right', label: 'Right' },
+]
 
 const updateStatusLabel = (status: UpdateStatus): string => {
   switch (status) {
@@ -51,12 +84,25 @@ const SettingsPage = () => {
   const desktop = isDesktopApp()
   const user = useAuthStore((s) => s.user)
   const companyId = useCompanyContextStore((s) => s.activeCompanyId) || ''
+  const { company } = useCompany(companyId)
   const { settings, loading: taxLoading } = useCompanyTaxSettings(companyId)
+  const {
+    settings: receiptRemote,
+    loading: receiptLoading,
+    error: receiptError,
+  } = useCompanyReceiptSettings(companyId)
+
+  const canSettings = can(user, 'settings')
+  const canReceipt = can(user, 'receipt')
 
   const receiptPrinterName = usePosSettingsStore((s) => s.receiptPrinterName)
   const autoPrint = usePosSettingsStore((s) => s.autoPrint)
+  const customerDisplayEnabled = usePosSettingsStore((s) => s.customerDisplayEnabled)
+  const customerDisplayId = usePosSettingsStore((s) => s.customerDisplayId)
   const setReceiptPrinterName = usePosSettingsStore((s) => s.setReceiptPrinterName)
   const setAutoPrint = usePosSettingsStore((s) => s.setAutoPrint)
+  const setCustomerDisplayEnabled = usePosSettingsStore((s) => s.setCustomerDisplayEnabled)
+  const setCustomerDisplayId = usePosSettingsStore((s) => s.setCustomerDisplayId)
 
   const [printers, setPrinters] = useState<DesktopPrinter[]>([])
   const [loadingPrinters, setLoadingPrinters] = useState(desktop)
@@ -64,9 +110,23 @@ const SettingsPage = () => {
   const [autoPrintLocal, setAutoPrintLocal] = useState(autoPrint)
   const [testing, setTesting] = useState(false)
 
+  const [displays, setDisplays] = useState<DesktopDisplayInfo[]>([])
+  const [loadingDisplays, setLoadingDisplays] = useState(desktop)
+  const [cfdEnabledLocal, setCfdEnabledLocal] = useState(customerDisplayEnabled)
+  const [cfdDisplayIdLocal, setCfdDisplayIdLocal] = useState<string>(
+    customerDisplayId != null ? String(customerDisplayId) : '',
+  )
+  const [identifyingDisplays, setIdentifyingDisplays] = useState(false)
+  const [cfdBusy, setCfdBusy] = useState(false)
+
   const [taxComponents, setTaxComponents] = useState<TaxComponent[]>([])
   const [savingTax, setSavingTax] = useState(false)
   const [taxDirty, setTaxDirty] = useState(false)
+
+  const [receiptBlocks, setReceiptBlocks] = useState<ReceiptBlock[]>([])
+  const [receiptDirty, setReceiptDirty] = useState(false)
+  const [savingReceipt, setSavingReceipt] = useState(false)
+  const [addBlockType, setAddBlockType] = useState<ReceiptBlockType>('text')
 
   const [appVersion, setAppVersion] = useState('')
   const [updateInfo, setUpdateInfo] = useState<UpdateEventPayload | null>(null)
@@ -77,6 +137,11 @@ const SettingsPage = () => {
     setSelectedPrinter(receiptPrinterName ?? '')
     setAutoPrintLocal(autoPrint)
   }, [receiptPrinterName, autoPrint])
+
+  useEffect(() => {
+    setCfdEnabledLocal(customerDisplayEnabled)
+    setCfdDisplayIdLocal(customerDisplayId != null ? String(customerDisplayId) : '')
+  }, [customerDisplayEnabled, customerDisplayId])
 
   useEffect(() => {
     if (!desktop || !window.posDesktop) return
@@ -121,6 +186,21 @@ const SettingsPage = () => {
     )
     setTaxComponents(list)
   }, [settings, taxDirty])
+
+  useEffect(() => {
+    if (receiptDirty) return
+    setReceiptBlocks(resolveReceiptBlocks(receiptRemote))
+  }, [receiptRemote, receiptDirty])
+
+  useEffect(() => {
+    if (!receiptError || !canReceipt) return
+    toast.error(
+      receiptError.message.includes('PERMISSION') ||
+        receiptError.code === 'PERMISSION_DENIED'
+        ? 'Cannot load receipt settings — deploy database rules (npm run deploy:rules).'
+        : receiptError.message,
+    )
+  }, [receiptError, canReceipt])
 
   useEffect(() => {
     if (!desktop || !window.posDesktop) return
@@ -180,6 +260,88 @@ const SettingsPage = () => {
       toast.error(err instanceof Error ? err.message : 'Failed to refresh printers')
     } finally {
       setLoadingPrinters(false)
+    }
+  }
+
+  useEffect(() => {
+    if (!desktop || !window.posDesktop) return
+    let cancelled = false
+    void (async () => {
+      try {
+        const list = await window.posDesktop!.getDisplays()
+        if (!cancelled) setDisplays(list)
+      } catch (err) {
+        if (!cancelled) {
+          toast.error(err instanceof Error ? err.message : 'Failed to load displays')
+        }
+      } finally {
+        if (!cancelled) setLoadingDisplays(false)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [desktop])
+
+  const handleRefreshDisplays = async () => {
+    if (!window.posDesktop) return
+    setLoadingDisplays(true)
+    try {
+      const list = await window.posDesktop.getDisplays()
+      setDisplays(list)
+      toast.success('Display list refreshed')
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to refresh displays')
+    } finally {
+      setLoadingDisplays(false)
+    }
+  }
+
+  const handleSaveCustomerDisplay = () => {
+    setCustomerDisplayEnabled(cfdEnabledLocal)
+    setCustomerDisplayId(cfdDisplayIdLocal ? Number(cfdDisplayIdLocal) : null)
+    toast.success('Customer display settings saved')
+  }
+
+  const handleIdentifyDisplays = async () => {
+    if (!window.posDesktop) return
+    setIdentifyingDisplays(true)
+    try {
+      await window.posDesktop.identifyDisplays()
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not identify displays')
+    } finally {
+      setIdentifyingDisplays(false)
+    }
+  }
+
+  const handleOpenCustomerDisplay = async () => {
+    if (!window.posDesktop) return
+    setCfdBusy(true)
+    try {
+      const id = cfdDisplayIdLocal ? Number(cfdDisplayIdLocal) : null
+      setCustomerDisplayEnabled(true)
+      setCfdEnabledLocal(true)
+      setCustomerDisplayId(id)
+      await window.posDesktop.openCustomerDisplay({ displayId: id })
+      toast.success('Customer display opened')
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to open customer display')
+    } finally {
+      setCfdBusy(false)
+    }
+  }
+
+  const handleCloseCustomerDisplay = async () => {
+    if (!window.posDesktop) return
+    setCfdBusy(true)
+    try {
+      await window.posDesktop.closeCustomerDisplay()
+      toast.success('Customer display closed')
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to close customer display')
+    } finally {
+      setCfdBusy(false)
     }
   }
 
@@ -272,15 +434,70 @@ const SettingsPage = () => {
     }
   }
 
+  const updateReceiptBlock = (id: string, patch: Partial<ReceiptBlock>) => {
+    setReceiptDirty(true)
+    setReceiptBlocks((list) =>
+      list.map((block) => (block.id === id ? { ...block, ...patch } : block)),
+    )
+  }
+
+  const addReceiptBlock = () => {
+    setReceiptDirty(true)
+    setReceiptBlocks((list) => [...list, createReceiptBlock(addBlockType)])
+  }
+
+  const removeReceiptBlock = (id: string) => {
+    setReceiptDirty(true)
+    setReceiptBlocks((list) => list.filter((block) => block.id !== id))
+  }
+
+  const moveReceiptBlock = (id: string, dir: -1 | 1) => {
+    setReceiptDirty(true)
+    setReceiptBlocks((list) => {
+      const idx = list.findIndex((b) => b.id === id)
+      if (idx < 0) return list
+      const next = idx + dir
+      if (next < 0 || next >= list.length) return list
+      const copy = [...list]
+      const [item] = copy.splice(idx, 1)
+      copy.splice(next, 0, item)
+      return copy
+    })
+  }
+
+  const handleResetReceipt = () => {
+    if (!window.confirm('Reset receipt template to the default layout?')) return
+    setReceiptDirty(true)
+    setReceiptBlocks(defaultReceiptBlocks())
+  }
+
+  const handleSaveReceipt = async () => {
+    if (!companyId || !user) {
+      toast.error('Missing company context')
+      return
+    }
+    setSavingReceipt(true)
+    try {
+      await saveReceiptSettings(companyId, receiptBlocks, user.uid)
+      setReceiptDirty(false)
+      toast.success('Receipt template saved')
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to save receipt template')
+    } finally {
+      setSavingReceipt(false)
+    }
+  }
+
   return (
     <div className="mx-auto max-w-2xl space-y-6 p-4 md:p-8">
       <div>
         <h1 className="text-xl font-semibold text-slate-900">Settings</h1>
         <p className="mt-1 text-sm text-slate-500">
-          Configure company tax and POS printing for this device.
+          Configure tax, receipt content, and POS printing for this company and device.
         </p>
       </div>
 
+      {canSettings && (
       <div className="card space-y-6 p-6">
         <section>
           <h2 className="text-sm font-semibold text-slate-900">Tax groups</h2>
@@ -452,8 +669,300 @@ const SettingsPage = () => {
           )}
         </section>
       </div>
+      )}
 
-      {desktop && (
+      {canReceipt && (
+        <div className="card space-y-6 p-6">
+          <section>
+            <h2 className="text-sm font-semibold text-slate-900">Receipt template</h2>
+            <p className="mt-1 text-sm text-slate-500">
+              Build the full receipt from ordered blocks: custom text, company fields,
+              and order fields. Reorder, align, and save. Logo and company name values
+              still come from the company profile.
+            </p>
+
+            {!companyId ? (
+              <p className="mt-3 text-sm text-amber-700">
+                Select a company to edit the receipt template.
+              </p>
+            ) : receiptLoading && !receiptDirty ? (
+              <p className="mt-3 text-sm text-slate-400">Loading receipt template…</p>
+            ) : (
+              <div className="mt-4 space-y-6">
+                <ul className="space-y-3">
+                  {receiptBlocks.map((block, index) => (
+                    <li
+                      key={block.id}
+                      className="rounded-lg border border-slate-200 bg-slate-50/80 p-3"
+                    >
+                      <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                        <span className="text-xs font-semibold uppercase tracking-wide text-slate-600">
+                          {RECEIPT_BLOCK_LABELS[block.type]}
+                        </span>
+                        <div className="flex flex-wrap gap-1">
+                          <button
+                            type="button"
+                            className="btn-secondary px-2 py-1 text-xs"
+                            disabled={index === 0}
+                            onClick={() => moveReceiptBlock(block.id, -1)}
+                          >
+                            Up
+                          </button>
+                          <button
+                            type="button"
+                            className="btn-secondary px-2 py-1 text-xs"
+                            disabled={index === receiptBlocks.length - 1}
+                            onClick={() => moveReceiptBlock(block.id, 1)}
+                          >
+                            Down
+                          </button>
+                          <button
+                            type="button"
+                            className="btn-secondary px-2 py-1 text-xs text-red-700"
+                            onClick={() => removeReceiptBlock(block.id)}
+                          >
+                            Remove
+                          </button>
+                        </div>
+                      </div>
+                      <div className="flex flex-wrap items-end gap-2">
+                        {block.type === 'text' && (
+                          <label className="min-w-[160px] flex-1">
+                            <span className="mb-1 block text-xs font-medium text-slate-600">
+                              Text
+                            </span>
+                            <input
+                              type="text"
+                              className="input w-full"
+                              value={block.text ?? ''}
+                              placeholder="e.g. 123 Main St · (555) 0100"
+                              onChange={(e) =>
+                                updateReceiptBlock(block.id, { text: e.target.value })
+                              }
+                            />
+                          </label>
+                        )}
+                        {block.type === 'thankYou' && (
+                          <label className="min-w-[160px] flex-1">
+                            <span className="mb-1 block text-xs font-medium text-slate-600">
+                              Thank-you text
+                            </span>
+                            <input
+                              type="text"
+                              className="input w-full"
+                              value={block.text ?? ''}
+                              placeholder="Thank you!"
+                              onChange={(e) =>
+                                updateReceiptBlock(block.id, { text: e.target.value })
+                              }
+                            />
+                          </label>
+                        )}
+                        {blockSupportsLabel(block.type) && (
+                          <label className="w-36">
+                            <span className="mb-1 block text-xs font-medium text-slate-600">
+                              Label
+                            </span>
+                            <input
+                              type="text"
+                              className="input w-full"
+                              value={block.label ?? ''}
+                              placeholder={RECEIPT_BLOCK_LABELS[block.type]}
+                              onChange={(e) =>
+                                updateReceiptBlock(block.id, { label: e.target.value })
+                              }
+                            />
+                          </label>
+                        )}
+                        {blockSupportsAlign(block.type) && (
+                          <label className="w-28">
+                            <span className="mb-1 block text-xs font-medium text-slate-600">
+                              Align
+                            </span>
+                            <select
+                              className="input w-full"
+                              value={block.align ?? 'left'}
+                              onChange={(e) =>
+                                updateReceiptBlock(block.id, {
+                                  align: e.target.value as ReceiptAlign,
+                                })
+                              }
+                            >
+                              {ALIGN_OPTIONS.map((opt) => (
+                                <option key={opt.value} value={opt.value}>
+                                  {opt.label}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                        )}
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+
+                <div className="flex flex-wrap items-end gap-2">
+                  <label className="min-w-[180px] flex-1">
+                    <span className="mb-1 block text-xs font-medium text-slate-600">
+                      Add block
+                    </span>
+                    <select
+                      className="input w-full"
+                      value={addBlockType}
+                      onChange={(e) =>
+                        setAddBlockType(e.target.value as ReceiptBlockType)
+                      }
+                    >
+                      {RECEIPT_BLOCK_TYPES.map((type) => (
+                        <option key={type} value={type}>
+                          {RECEIPT_BLOCK_LABELS[type]}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <button type="button" className="btn-secondary" onClick={addReceiptBlock}>
+                    Add
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    onClick={handleResetReceipt}
+                  >
+                    Reset to default
+                  </button>
+                </div>
+
+                <div className="border-t border-slate-100 pt-6">
+                  <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                    Preview
+                  </h3>
+                  <div className="mt-3 overflow-hidden rounded-lg border border-slate-200 bg-slate-100 py-4">
+                    <ReceiptDocument
+                      id="receipt-preview"
+                      order={{
+                        ...SAMPLE_RECEIPT_ORDER,
+                        companyId: companyId || 'preview',
+                      }}
+                      company={company}
+                      blocks={receiptBlocks}
+                      className="shadow-none"
+                    />
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  className="btn-primary"
+                  disabled={savingReceipt || !companyId}
+                  onClick={() => void handleSaveReceipt()}
+                >
+                  {savingReceipt ? 'Saving…' : 'Save receipt template'}
+                </button>
+              </div>
+            )}
+          </section>
+        </div>
+      )}
+
+      {canSettings && desktop && (
+        <div className="card space-y-4 p-6">
+          <section>
+            <h2 className="text-sm font-semibold text-slate-900">Customer display</h2>
+            <p className="mt-1 text-sm text-slate-500">
+              Show the live order on a second monitor facing the customer. Works with
+              dual-screen POS terminals and external monitors.
+            </p>
+            <div className="mt-4 space-y-3">
+              <label className="flex items-center gap-2 text-sm text-slate-700">
+                <input
+                  type="checkbox"
+                  className="h-4 w-4 rounded border-slate-300 text-brand-600 focus:ring-brand-500"
+                  checked={cfdEnabledLocal}
+                  onChange={(e) => setCfdEnabledLocal(e.target.checked)}
+                />
+                Enable customer display
+              </label>
+
+              <div className="flex flex-wrap items-end gap-2">
+                <label className="min-w-[220px] flex-1">
+                  <span className="mb-1 block text-xs font-medium text-slate-600">
+                    Screen
+                  </span>
+                  <select
+                    className="input w-full"
+                    value={cfdDisplayIdLocal}
+                    disabled={loadingDisplays}
+                    onChange={(e) => setCfdDisplayIdLocal(e.target.value)}
+                  >
+                    <option value="">Auto (second screen if available)</option>
+                    {displays.map((d, index) => (
+                      <option key={d.id} value={String(d.id)}>
+                        Display {index + 1}
+                        {d.isPrimary ? ' · Primary' : ''} — {d.width}×{d.height}
+                        {d.label ? ` (${d.label})` : ''}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  onClick={() => void handleRefreshDisplays()}
+                  disabled={loadingDisplays}
+                >
+                  Refresh
+                </button>
+              </div>
+
+              {loadingDisplays && (
+                <p className="text-xs text-slate-400">Loading displays…</p>
+              )}
+              {!loadingDisplays && displays.length < 2 && (
+                <p className="text-sm text-amber-700">
+                  Only one display detected. Connect a second screen for a dedicated
+                  customer view.
+                </p>
+              )}
+
+              <div className="flex flex-wrap gap-3 pt-1">
+                <button
+                  type="button"
+                  className="btn-primary"
+                  onClick={handleSaveCustomerDisplay}
+                >
+                  Save customer display
+                </button>
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  disabled={identifyingDisplays}
+                  onClick={() => void handleIdentifyDisplays()}
+                >
+                  {identifyingDisplays ? 'Showing…' : 'Identify screens'}
+                </button>
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  disabled={cfdBusy}
+                  onClick={() => void handleOpenCustomerDisplay()}
+                >
+                  Open
+                </button>
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  disabled={cfdBusy}
+                  onClick={() => void handleCloseCustomerDisplay()}
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+          </section>
+        </div>
+      )}
+
+      {canSettings && desktop && (
         <div className="card space-y-4 p-6">
           <section>
             <h2 className="text-sm font-semibold text-slate-900">App updates</h2>
@@ -530,6 +1039,7 @@ const SettingsPage = () => {
         </div>
       )}
 
+      {canSettings && (
       <div className="card space-y-6 p-6">
         <section>
           <h2 className="text-sm font-semibold text-slate-900">Receipt printer</h2>
@@ -622,6 +1132,7 @@ const SettingsPage = () => {
           )}
         </div>
       </div>
+      )}
     </div>
   )
 }

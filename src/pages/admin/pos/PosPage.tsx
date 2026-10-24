@@ -3,6 +3,7 @@ import toast from 'react-hot-toast'
 import { useCompanyContextStore } from '@/stores/companyContextStore'
 import { useCompanyMenu } from '@/hooks/useCompanyMenu'
 import { usePosKioskMode } from '@/hooks/usePosKioskMode'
+import { useCustomerDisplaySync } from '@/hooks/useCustomerDisplaySync'
 import { useCartStore } from '@/stores/cartStore'
 import type { MenuItem } from '@/types'
 import LoadingScreen from '@/components/common/LoadingScreen'
@@ -22,6 +23,7 @@ const PosPage = () => {
   const addLine = useCartStore((s) => s.addLine)
   const { active: kioskActive, supported: kioskSupported, desired, enter, exit } =
     usePosKioskMode()
+  useCustomerDisplaySync(companyId)
 
   const [activeCat, setActiveCat] = useState<string>('all')
   const [search, setSearch] = useState('')

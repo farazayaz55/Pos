@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { CartModifierSelection, MenuItem, ModifierGroup } from '@/types'
 import CachedImage from '@/components/common/CachedImage'
+import VirtualKeyboard from '@/components/common/VirtualKeyboard'
 import { formatMoney } from '@/utils/currency'
 import { calcLineUnit } from '@/utils/orderCalc'
 
@@ -26,6 +27,7 @@ const ItemModifierModal = ({ item, groups, onCancel, onConfirm }: Props) => {
   const [selection, setSelection] = useState<Selection>({})
   const [quantity, setQuantity] = useState(1)
   const [note, setNote] = useState('')
+  const [noteKeyboardOpen, setNoteKeyboardOpen] = useState(false)
 
   useEffect(() => {
     const init: Selection = {}
@@ -143,7 +145,10 @@ const ItemModifierModal = ({ item, groups, onCancel, onConfirm }: Props) => {
                           <button
                             key={opt.id}
                             type="button"
-                            onClick={() => toggle(g, opt.id)}
+                            onClick={() => {
+                              setNoteKeyboardOpen(false)
+                              toggle(g, opt.id)
+                            }}
                             className={
                               active
                                 ? 'flex items-center justify-between rounded-lg border-2 border-brand-600 bg-brand-50 px-3 py-2 text-sm'
@@ -175,8 +180,20 @@ const ItemModifierModal = ({ item, groups, onCancel, onConfirm }: Props) => {
               rows={2}
               placeholder="e.g. no onions"
               value={note}
-              onChange={(e) => setNote(e.target.value)}
+              readOnly
+              inputMode="none"
+              onFocus={() => setNoteKeyboardOpen(true)}
+              onClick={() => setNoteKeyboardOpen(true)}
             />
+            {noteKeyboardOpen && (
+              <VirtualKeyboard
+                mode="text"
+                value={note}
+                onChange={setNote}
+                onDone={() => setNoteKeyboardOpen(false)}
+                className="mt-3"
+              />
+            )}
           </div>
         </div>
 
@@ -184,14 +201,22 @@ const ItemModifierModal = ({ item, groups, onCancel, onConfirm }: Props) => {
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
               <button
-                onClick={() => setQuantity((q) => Math.max(1, q - 1))}
+                type="button"
+                onClick={() => {
+                  setNoteKeyboardOpen(false)
+                  setQuantity((q) => Math.max(1, q - 1))
+                }}
                 className="btn-secondary h-9 w-9 p-0 text-lg"
               >
                 -
               </button>
               <span className="w-8 text-center font-semibold">{quantity}</span>
               <button
-                onClick={() => setQuantity((q) => q + 1)}
+                type="button"
+                onClick={() => {
+                  setNoteKeyboardOpen(false)
+                  setQuantity((q) => q + 1)
+                }}
                 className="btn-secondary h-9 w-9 p-0 text-lg"
               >
                 +
@@ -203,10 +228,11 @@ const ItemModifierModal = ({ item, groups, onCancel, onConfirm }: Props) => {
             </div>
           </div>
           <div className="flex gap-2">
-            <button onClick={onCancel} className="btn-secondary flex-1">
+            <button type="button" onClick={onCancel} className="btn-secondary flex-1">
               Cancel
             </button>
             <button
+              type="button"
               onClick={handleConfirm}
               disabled={!canConfirm}
               className="btn-primary flex-[2]"

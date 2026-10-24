@@ -1,5 +1,5 @@
 import { usePosSettingsStore } from '@/stores/posSettingsStore'
-import type { Order } from '@/types'
+import type { CompanyReceiptSettings, Order } from '@/types'
 import {
   formatReceiptPlainText,
   type ReceiptCompanyInfo,
@@ -105,6 +105,7 @@ async function buildReceiptPrintHtml(receipt: HTMLElement): Promise<{
 export type PrintReceiptInput = {
   order: Order
   company?: ReceiptCompanyInfo
+  receiptSettings?: CompanyReceiptSettings | null
 }
 
 /**
@@ -136,7 +137,11 @@ export async function printReceipt(input: PrintReceiptInput): Promise<void> {
     requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
   })
 
-  const text = formatReceiptPlainText(input.order, input.company)
+  const text = formatReceiptPlainText(
+    input.order,
+    input.company,
+    input.receiptSettings,
+  )
   const { html, pageHeightMicrons } = await buildReceiptPrintHtml(receipt)
   const result = await desktop.print({
     deviceName,

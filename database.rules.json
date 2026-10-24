@@ -28,6 +28,13 @@
       }
     },
 
+    "receiptSettings": {
+      "$companyId": {
+        ".read": "auth != null",
+        ".write": "auth != null && (auth.token.role == 'super_admin' || (auth.token.role == 'admin' && auth.token.companyId == $companyId) || (auth.token.role == 'staff' && auth.token.companyId == $companyId && auth.token.permissions.receipt == true))"
+      }
+    },
+
     "menu": {
       "$companyId": {
         ".read": true,

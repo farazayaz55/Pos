@@ -1,6 +1,12 @@
-import type { Order } from '@/types'
+import type {
+  CompanyReceiptSettings,
+  Order,
+  ReceiptAlign,
+  ReceiptBlock,
+} from '@/types'
 import { formatMoney } from '@/utils/currency'
 import { formatOrderNumber } from '@/utils/businessDate'
+import { resolveReceiptBlocks } from '@/utils/receiptBlocks'
 
 /** Characters per line for 80mm font A (POS-80). */
 export const RECEIPT_CHARS = 42
@@ -9,6 +15,7 @@ export type ReceiptCompanyInfo = {
   name?: string
   location?: string
   phone?: string
+  logoUrl?: string
 } | null
 
 const formatDate = (ts: number) =>
@@ -27,6 +34,27 @@ export const centerLine = (text: string, width = RECEIPT_CHARS): string => {
   return `${' '.repeat(pad)}${t}`
 }
 
+/** Right-align text within a fixed thermal width. */
+export const rightLine = (text: string, width = RECEIPT_CHARS): string => {
+  const t = clip(text.trim(), width)
+  const pad = Math.max(0, width - t.length)
+  return `${' '.repeat(pad)}${t}`
+}
+
+/** Left-align (clipped) within a fixed thermal width. */
+export const leftLine = (text: string, width = RECEIPT_CHARS): string =>
+  clip(text.trim(), width)
+
+export const alignLine = (
+  text: string,
+  align: ReceiptAlign = 'center',
+  width = RECEIPT_CHARS,
+): string => {
+  if (align === 'left') return leftLine(text, width)
+  if (align === 'right') return rightLine(text, width)
+  return centerLine(text, width)
+}
+
 /** Label left, value right on one line (matches app flex justify-between). */
 export const padLine = (
   left: string,
@@ -42,109 +70,206 @@ export const padLine = (
 
 const divider = (width = RECEIPT_CHARS) => '-'.repeat(width)
 
+export const receiptAlignClass = (align: ReceiptAlign = 'center'): string => {
+  if (align === 'left') return 'text-left'
+  if (align === 'right') return 'text-right'
+  return 'text-center'
+}
+
+const fieldLine = (
+  label: string,
+  value: string,
+  align: ReceiptAlign = 'left',
+): string => {
+  if (align === 'center') return centerLine(`${label}: ${value}`)
+  if (align === 'right') return rightLine(`${label}: ${value}`)
+  return padLine(label, value)
+}
+
+const defaultLabel = (block: ReceiptBlock, fallback: string) =>
+  block.label?.trim() || fallback
+
+const paymentSubtitle = (order: Order): string =>
+  order.paymentMethod === 'cash'
+    ? order.paymentStatus === 'pending'
+      ? 'Payment pending'
+      : 'Paid in cash'
+    : order.orderSource === 'kiosk'
+      ? 'Self-service kiosk order'
+      : 'Paid by card'
+
+const appendBlockLines = (
+  lines: string[],
+  block: ReceiptBlock,
+  order: Order,
+  company?: ReceiptCompanyInfo,
+) => {
+  const align = block.align ?? 'left'
+
+  switch (block.type) {
+    case 'text': {
+      if (!block.text?.trim()) return
+      lines.push(alignLine(block.text, block.align ?? 'center'))
+      return
+    }
+    case 'logo':
+      return
+    case 'companyName':
+      lines.push(
+        alignLine(
+          (company?.name || 'Restaurant').toUpperCase(),
+          block.align ?? 'center',
+        ),
+      )
+      return
+    case 'companyLocation':
+      if (!company?.location) return
+      lines.push(alignLine(company.location, block.align ?? 'center'))
+      return
+    case 'companyPhone':
+      if (!company?.phone) return
+      lines.push(alignLine(company.phone, block.align ?? 'center'))
+      return
+    case 'divider':
+      lines.push(divider())
+      return
+    case 'orderNumber':
+      lines.push(
+        fieldLine(
+          defaultLabel(block, 'Order #'),
+          formatOrderNumber(order.orderNumber),
+          align,
+        ),
+      )
+      return
+    case 'date':
+      lines.push(
+        fieldLine(defaultLabel(block, 'Date'), formatDate(order.createdAt), align),
+      )
+      return
+    case 'table':
+      if (!order.tableNumber) return
+      lines.push(
+        fieldLine(defaultLabel(block, 'Table'), order.tableNumber, align),
+      )
+      return
+    case 'cashier':
+      lines.push(
+        fieldLine(defaultLabel(block, 'Cashier'), order.createdByName, align),
+      )
+      return
+    case 'lineItems':
+      for (const it of order.items) {
+        lines.push(
+          padLine(`${it.quantity} x ${it.itemName}`, formatMoney(it.lineTotal)),
+        )
+        for (const m of it.modifiers ?? []) {
+          const adj =
+            m.priceAdjustment !== 0
+              ? ` (${m.priceAdjustment > 0 ? '+' : ''}${formatMoney(m.priceAdjustment)})`
+              : ''
+          lines.push(`  + ${m.optionName}${adj}`)
+        }
+        if (it.note) lines.push(`  "${it.note}"`)
+      }
+      return
+    case 'subtotal':
+      lines.push(
+        fieldLine(
+          defaultLabel(block, 'Subtotal'),
+          formatMoney(order.subtotal),
+          align,
+        ),
+      )
+      return
+    case 'discount': {
+      if (!(order.discount.amount > 0)) return
+      const label =
+        block.label?.trim() ||
+        (order.discount.type === 'percent'
+          ? `Discount (${order.discount.value}%)`
+          : 'Discount')
+      lines.push(fieldLine(label, `-${formatMoney(order.discount.amount)}`, align))
+      return
+    }
+    case 'tax':
+      if (order.taxLines && order.taxLines.length > 0) {
+        for (const tax of order.taxLines) {
+          lines.push(
+            fieldLine(
+              `${tax.name} (${Math.round(tax.rate * 10000) / 100}%)`,
+              formatMoney(tax.amount),
+              align,
+            ),
+          )
+        }
+      } else if (order.tax != null && order.tax > 0) {
+        lines.push(
+          fieldLine(defaultLabel(block, 'Tax'), formatMoney(order.tax), align),
+        )
+      }
+      return
+    case 'tip':
+      if (!(order.tip != null && order.tip > 0)) return
+      lines.push(
+        fieldLine(defaultLabel(block, 'Tip'), formatMoney(order.tip), align),
+      )
+      return
+    case 'total':
+      lines.push(
+        fieldLine(defaultLabel(block, 'TOTAL'), formatMoney(order.total), align),
+      )
+      return
+    case 'payment':
+      if (order.paymentStatus === 'refunded') {
+        lines.push(fieldLine('Status', 'Refunded', align))
+      } else if (order.paymentMethod === 'cash') {
+        if (order.paymentStatus === 'pending') {
+          lines.push(fieldLine('Cash due', formatMoney(order.total), align))
+          lines.push(fieldLine('Status', 'Pending', align))
+        } else {
+          lines.push(
+            fieldLine('Cash', formatMoney(order.cashReceived ?? 0), align),
+          )
+          lines.push(fieldLine('Change', formatMoney(order.change ?? 0), align))
+        }
+      } else {
+        lines.push(
+          fieldLine('Paid', order.paymentMethod.replace('_', ' '), align),
+        )
+      }
+      return
+    case 'thankYou': {
+      const a = block.align ?? 'center'
+      if (order.paymentStatus === 'refunded') {
+        lines.push(alignLine('REFUNDED', a))
+        if (order.refundedAt) {
+          const who = order.refundedByName ? ` · ${order.refundedByName}` : ''
+          lines.push(alignLine(`${formatDate(order.refundedAt)}${who}`, a))
+        }
+      } else {
+        lines.push(alignLine(block.text?.trim() || 'Thank you!', a))
+        lines.push(alignLine(paymentSubtitle(order), a))
+      }
+      return
+    }
+    default:
+      return
+  }
+}
+
 /**
- * Build ESC/POS plain text that mirrors the on-screen receipt layout:
- * centered header, same-line label/value rows, right-aligned prices.
+ * Build ESC/POS plain text from the configured receipt block template.
  */
 export function formatReceiptPlainText(
   order: Order,
   company?: ReceiptCompanyInfo,
+  settings?: CompanyReceiptSettings | null,
 ): string {
+  const blocks = resolveReceiptBlocks(settings)
   const lines: string[] = []
-
-  lines.push(centerLine((company?.name || 'Restaurant').toUpperCase()))
-  if (company?.location) lines.push(centerLine(company.location))
-  if (company?.phone) lines.push(centerLine(company.phone))
-  lines.push(divider())
-
-  lines.push(padLine('Order #', formatOrderNumber(order.orderNumber)))
-  lines.push(padLine('Date', formatDate(order.createdAt)))
-  if (order.tableNumber) {
-    lines.push(padLine('Table', order.tableNumber))
+  for (const block of blocks) {
+    appendBlockLines(lines, block, order, company)
   }
-  lines.push(padLine('Cashier', order.createdByName))
-  lines.push(divider())
-
-  for (const it of order.items) {
-    lines.push(padLine(`${it.quantity} x ${it.itemName}`, formatMoney(it.lineTotal)))
-    for (const m of it.modifiers ?? []) {
-      const adj =
-        m.priceAdjustment !== 0
-          ? ` (${m.priceAdjustment > 0 ? '+' : ''}${formatMoney(m.priceAdjustment)})`
-          : ''
-      lines.push(`  + ${m.optionName}${adj}`)
-    }
-    if (it.note) {
-      lines.push(`  "${it.note}"`)
-    }
-  }
-
-  lines.push(divider())
-  lines.push(padLine('Subtotal', formatMoney(order.subtotal)))
-
-  if (order.discount.amount > 0) {
-    const label =
-      order.discount.type === 'percent'
-        ? `Discount (${order.discount.value}%)`
-        : 'Discount'
-    lines.push(padLine(label, `-${formatMoney(order.discount.amount)}`))
-  }
-
-  if (order.taxLines && order.taxLines.length > 0) {
-    for (const tax of order.taxLines) {
-      lines.push(
-        padLine(
-          `${tax.name} (${Math.round(tax.rate * 10000) / 100}%)`,
-          formatMoney(tax.amount),
-        ),
-      )
-    }
-  } else if (order.tax != null && order.tax > 0) {
-    lines.push(padLine('Tax', formatMoney(order.tax)))
-  }
-
-  if (order.tip != null && order.tip > 0) {
-    lines.push(padLine('Tip', formatMoney(order.tip)))
-  }
-
-  lines.push(padLine('TOTAL', formatMoney(order.total)))
-
-  if (order.paymentStatus === 'refunded') {
-    lines.push(padLine('Status', 'Refunded'))
-  } else if (order.paymentMethod === 'cash') {
-    if (order.paymentStatus === 'pending') {
-      lines.push(padLine('Cash due', formatMoney(order.total)))
-      lines.push(padLine('Status', 'Pending'))
-    } else {
-      lines.push(padLine('Cash', formatMoney(order.cashReceived ?? 0)))
-      lines.push(padLine('Change', formatMoney(order.change ?? 0)))
-    }
-  } else {
-    lines.push(
-      padLine('Paid', order.paymentMethod.replace('_', ' ')),
-    )
-  }
-
-  lines.push(divider())
-
-  if (order.paymentStatus === 'refunded') {
-    lines.push(centerLine('REFUNDED'))
-    if (order.refundedAt) {
-      const who = order.refundedByName ? ` · ${order.refundedByName}` : ''
-      lines.push(centerLine(`${formatDate(order.refundedAt)}${who}`))
-    }
-  } else {
-    lines.push(centerLine('Thank you!'))
-    const footer =
-      order.paymentMethod === 'cash'
-        ? order.paymentStatus === 'pending'
-          ? 'Payment pending'
-          : 'Paid in cash'
-        : order.orderSource === 'kiosk'
-          ? 'Self-service kiosk order'
-          : 'Paid by card'
-    lines.push(centerLine(footer))
-  }
-
   return lines.join('\n')
 }

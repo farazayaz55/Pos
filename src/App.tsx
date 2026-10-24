@@ -26,6 +26,7 @@ import SettingsPage from '@/pages/admin/settings/SettingsPage'
 import TeamPage from '@/pages/admin/team/TeamPage'
 
 import DisplayPage from '@/pages/display/DisplayPage'
+import CustomerDisplayPage from '@/pages/display/CustomerDisplayPage'
 
 const App = () => {
   const init = useAuthStore((s) => s.init)
@@ -68,6 +69,7 @@ const App = () => {
       <Route path="/login" element={<LoginPage />} />
 
       <Route path="/display/:companyId" element={<DisplayPage />} />
+      <Route path="/customer-display" element={<CustomerDisplayPage />} />
 
       <Route
         path="/super-admin"
@@ -143,7 +145,7 @@ const App = () => {
         <Route
           path="settings"
           element={
-            <PermissionGate permission="settings">
+            <PermissionGate anyOf={['settings', 'receipt']}>
               <SettingsPage />
             </PermissionGate>
           }

@@ -3,6 +3,7 @@ import type {
   AppUser,
   Category,
   Company,
+  CompanyReceiptSettings,
   CompanyTaxSettings,
   MenuItem,
   ModifierGroup,
@@ -22,6 +23,12 @@ export interface TaxCacheRow {
   companyId: string
   settings: CompanyTaxSettings | null
   legacyTaxRate?: number
+  updatedAt: number
+}
+
+export interface ReceiptCacheRow {
+  companyId: string
+  settings: CompanyReceiptSettings | null
   updatedAt: number
 }
 
@@ -66,6 +73,7 @@ export interface ImageCacheRow {
 class PosLocalDb extends Dexie {
   menuCache!: Table<MenuCacheRow, string>
   taxCache!: Table<TaxCacheRow, string>
+  receiptCache!: Table<ReceiptCacheRow, string>
   companyCache!: Table<CompanyCacheRow, string>
   authCache!: Table<AuthCacheRow, string>
   orderOutbox!: Table<OrderOutboxRow, string>
@@ -105,6 +113,16 @@ class PosLocalDb extends Dexie {
       .upgrade(async (tx) => {
         await tx.table('imageCache').clear()
       })
+    this.version(4).stores({
+      menuCache: 'companyId',
+      taxCache: 'companyId',
+      receiptCache: 'companyId',
+      companyCache: 'companyId',
+      authCache: 'uid',
+      orderOutbox: 'localId, companyId, syncStatus, clientCreatedAt',
+      meta: 'key',
+      imageCache: 'url, companyId, updatedAt',
+    })
   }
 }
 
@@ -147,6 +165,20 @@ export const saveTaxCache = async (
 }
 
 export const getTaxCache = (companyId: string) => localDb.taxCache.get(companyId)
+
+export const saveReceiptCache = async (
+  companyId: string,
+  settings: CompanyReceiptSettings | null,
+) => {
+  await localDb.receiptCache.put({
+    companyId,
+    settings,
+    updatedAt: Date.now(),
+  })
+}
+
+export const getReceiptCache = (companyId: string) =>
+  localDb.receiptCache.get(companyId)
 
 export const saveCompanyCache = async (company: Company) => {
   await localDb.companyCache.put({

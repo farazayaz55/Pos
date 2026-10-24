@@ -4,6 +4,7 @@ import {
   ipcMain,
   protocol,
   net,
+  screen,
   type WebContents,
   type WebContentsPrintOptions,
 } from 'electron'
@@ -334,8 +335,161 @@ protocol.registerSchemesAsPrivileged([
 ])
 
 let mainWindow: BrowserWindow | null = null
+let customerDisplayWindow: BrowserWindow | null = null
+
+type CustomerDisplayState = {
+  phase: 'idle' | 'ordering' | 'thanks'
+  companyName?: string
+  companyLogoUrl?: string
+  tableNumber?: string
+  lines: {
+    lineId: string
+    itemName: string
+    quantity: number
+    lineTotal: number
+    modifiers: { optionName: string; priceAdjustment: number }[]
+    note?: string
+  }[]
+  subtotal: number
+  discountAmount: number
+  taxLines: { name: string; rate: number; amount: number }[]
+  tax: number
+  total: number
+  orderNumber?: number
+  thanksTotal?: number
+}
+
+let latestCustomerDisplayState: CustomerDisplayState | null = null
 
 const distPath = () => path.join(__dirname, '..', 'dist')
+
+const mapDisplays = () => {
+  const primaryId = screen.getPrimaryDisplay().id
+  return screen.getAllDisplays().map((d, index) => ({
+    id: d.id,
+    label: d.label?.trim() || `Display ${index + 1}`,
+    width: d.bounds.width,
+    height: d.bounds.height,
+    isPrimary: d.id === primaryId,
+  }))
+}
+
+const resolveCustomerDisplay = (displayId?: number | null) => {
+  const displays = screen.getAllDisplays()
+  if (displays.length === 0) return screen.getPrimaryDisplay()
+  if (displayId != null) {
+    const match = displays.find((d) => d.id === displayId)
+    if (match) return match
+  }
+  const primaryId = screen.getPrimaryDisplay().id
+  return displays.find((d) => d.id !== primaryId) ?? displays[0]
+}
+
+const loadCustomerDisplayUrl = async (win: BrowserWindow) => {
+  if (isDev) {
+    await win.loadURL('http://localhost:5174/customer-display')
+  } else {
+    await win.loadURL(`${SCHEME}://./customer-display`)
+  }
+}
+
+const sendCustomerDisplayState = (win: BrowserWindow) => {
+  if (win.isDestroyed() || !latestCustomerDisplayState) return
+  win.webContents.send('pos:customer-display-state', latestCustomerDisplayState)
+}
+
+const openCustomerDisplayWindow = async (displayId?: number | null) => {
+  const target = resolveCustomerDisplay(displayId)
+  const { x, y, width, height } = target.bounds
+
+  if (customerDisplayWindow && !customerDisplayWindow.isDestroyed()) {
+    customerDisplayWindow.setBounds({ x, y, width, height })
+    customerDisplayWindow.setFullScreen(true)
+    customerDisplayWindow.focus()
+    sendCustomerDisplayState(customerDisplayWindow)
+    return
+  }
+
+  customerDisplayWindow = new BrowserWindow({
+    x,
+    y,
+    width,
+    height,
+    title: 'Customer Display',
+    frame: false,
+    autoHideMenuBar: true,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false,
+    },
+  })
+
+  customerDisplayWindow.setFullScreen(true)
+
+  customerDisplayWindow.on('closed', () => {
+    customerDisplayWindow = null
+  })
+
+  await loadCustomerDisplayUrl(customerDisplayWindow)
+  sendCustomerDisplayState(customerDisplayWindow)
+}
+
+const closeCustomerDisplayWindow = () => {
+  if (customerDisplayWindow && !customerDisplayWindow.isDestroyed()) {
+    customerDisplayWindow.close()
+  }
+  customerDisplayWindow = null
+}
+
+const identifyDisplays = async () => {
+  const displays = screen.getAllDisplays()
+  const overlays: BrowserWindow[] = []
+
+  for (let i = 0; i < displays.length; i++) {
+    const d = displays[i]
+    const { x, y, width, height } = d.bounds
+    const n = i + 1
+    const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><style>
+      html,body{margin:0;height:100%;background:#0f172a;color:#fff;
+      display:flex;flex-direction:column;align-items:center;justify-content:center;
+      font-family:system-ui,sans-serif;user-select:none;-webkit-user-select:none}
+      .n{font-size:min(40vw,280px);font-weight:700;line-height:1}
+      .l{margin-top:16px;font-size:24px;opacity:.8}
+    </style></head><body>
+      <div class="n">${n}</div>
+      <div class="l">Display ${n}${d.id === screen.getPrimaryDisplay().id ? ' · Primary' : ''}</div>
+    </body></html>`
+
+    const win = new BrowserWindow({
+      x,
+      y,
+      width,
+      height,
+      frame: false,
+      transparent: false,
+      alwaysOnTop: true,
+      skipTaskbar: true,
+      focusable: false,
+      resizable: false,
+      movable: false,
+      webPreferences: {
+        contextIsolation: true,
+        nodeIntegration: false,
+      },
+    })
+    win.setMenuBarVisibility(false)
+    win.setFullScreen(true)
+    await win.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`)
+    overlays.push(win)
+  }
+
+  await sleep(1600)
+  for (const win of overlays) {
+    if (!win.isDestroyed()) win.destroy()
+  }
+}
 
 const createWindow = () => {
   mainWindow = new BrowserWindow({
@@ -505,6 +659,36 @@ const registerIpc = () => {
       await displayWin.loadURL(`${SCHEME}://./display/${companyId}`)
     }
   })
+
+  ipcMain.handle('pos:get-displays', () => mapDisplays())
+
+  ipcMain.handle(
+    'pos:open-customer-display',
+    async (_event, options: { displayId?: number | null } = {}) => {
+      await openCustomerDisplayWindow(options.displayId)
+    },
+  )
+
+  ipcMain.handle('pos:close-customer-display', () => {
+    closeCustomerDisplayWindow()
+  })
+
+  ipcMain.handle('pos:identify-displays', async () => {
+    await identifyDisplays()
+  })
+
+  ipcMain.handle(
+    'pos:publish-customer-display',
+    (_event, state: CustomerDisplayState) => {
+      if (!state || typeof state !== 'object') return
+      latestCustomerDisplayState = state
+      if (customerDisplayWindow && !customerDisplayWindow.isDestroyed()) {
+        sendCustomerDisplayState(customerDisplayWindow)
+      }
+    },
+  )
+
+  ipcMain.handle('pos:get-customer-display-state', () => latestCustomerDisplayState)
 
   ipcMain.handle('pos:updater-get-status', () => getUpdatePayload())
 

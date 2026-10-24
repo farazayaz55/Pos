@@ -5,6 +5,7 @@ export const STAFF_PERMISSIONS: StaffPermission[] = [
   'menu',
   'orders',
   'settings',
+  'receipt',
   'team',
 ]
 
@@ -13,6 +14,7 @@ export const PERMISSION_LABELS: Record<StaffPermission, string> = {
   menu: 'Menu (Categories, Items, Modifiers)',
   orders: 'Orders',
   settings: 'Settings',
+  receipt: 'Receipt content & formatting',
   team: 'Team',
 }
 
@@ -21,6 +23,7 @@ export const emptyPermissions = (): StaffPermissions => ({
   menu: false,
   orders: false,
   settings: false,
+  receipt: false,
   team: false,
 })
 
@@ -29,6 +32,7 @@ export const defaultStaffPermissions = (): StaffPermissions => ({
   menu: false,
   orders: false,
   settings: false,
+  receipt: false,
   team: false,
 })
 
@@ -39,7 +43,7 @@ export const defaultAdminPath = (user: AppUser | null | undefined): string => {
   if (can(user, 'pos')) return '/admin/pos'
   if (can(user, 'menu')) return '/admin/menu/items'
   if (can(user, 'orders')) return '/admin/orders'
-  if (can(user, 'settings')) return '/admin/settings'
+  if (can(user, 'settings') || can(user, 'receipt')) return '/admin/settings'
   if (can(user, 'team')) return '/admin/team'
   return '/admin/pos'
 }

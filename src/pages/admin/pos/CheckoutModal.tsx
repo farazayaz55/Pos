@@ -1,11 +1,14 @@
 import { useEffect, useMemo, useState } from 'react'
 import toast from 'react-hot-toast'
 import { useNavigate } from 'react-router-dom'
+import VirtualKeyboard from '@/components/common/VirtualKeyboard'
 import { useAuthStore } from '@/stores/authStore'
 import { useCartStore } from '@/stores/cartStore'
 import { useCompanyContextStore } from '@/stores/companyContextStore'
 import { useCompanyTaxSettings } from '@/hooks/useCompanyTaxSettings'
+import { useCompany } from '@/hooks/useCompany'
 import { useOnlineStatus } from '@/hooks/useOnlineStatus'
+import { publishCustomerDisplayThanks } from '@/hooks/useCustomerDisplaySync'
 import { placeCashOrder, placeCashOrderUpdate } from '@/services/localOrders'
 import { isLocalOrderId } from '@/localdb/db'
 import { formatMoney } from '@/utils/currency'
@@ -23,6 +26,7 @@ const CheckoutModal = ({ open, onClose }: Props) => {
   const user = useAuthStore((s) => s.user)
   const companyId = useCompanyContextStore((s) => s.activeCompanyId)
   const { components } = useCompanyTaxSettings(companyId || undefined)
+  const { company } = useCompany(companyId || undefined)
   const { isOnline } = useOnlineStatus()
   const lines = useCartStore((s) => s.lines)
   const tableNumber = useCartStore((s) => s.tableNumber)
@@ -42,6 +46,7 @@ const CheckoutModal = ({ open, onClose }: Props) => {
   const navigate = useNavigate()
 
   const [cashInput, setCashInput] = useState('')
+  const [replaceOnNextKey, setReplaceOnNextKey] = useState(true)
   const [submitting, setSubmitting] = useState(false)
 
   const isEditing = !!editingOrderId
@@ -49,9 +54,15 @@ const CheckoutModal = ({ open, onClose }: Props) => {
   useEffect(() => {
     if (open) {
       setCashInput(total.toFixed(2))
+      setReplaceOnNextKey(true)
       setSubmitting(false)
     }
   }, [open, total])
+
+  const setCashPreset = (value: string) => {
+    setCashInput(value)
+    setReplaceOnNextKey(true)
+  }
 
   const cashReceived = useMemo(() => Number(cashInput) || 0, [cashInput])
   const change = useMemo(() => calcChange(cashReceived, total), [cashReceived, total])
@@ -103,6 +114,12 @@ const CheckoutModal = ({ open, onClose }: Props) => {
             discount,
             cashReceived,
           })
+      publishCustomerDisplayThanks({
+        companyName: company?.name,
+        companyLogoUrl: company?.logoUrl,
+        orderNumber: order.orderNumber,
+        total: order.total,
+      })
       clear()
       onClose()
       const pendingSync = order.syncStatus === 'pending' || order.syncStatus === 'error'
@@ -168,31 +185,40 @@ const CheckoutModal = ({ open, onClose }: Props) => {
         <div className="mt-4">
           <label className="label">Cash Received</label>
           <input
-            type="number"
-            step="0.01"
-            min="0"
+            type="text"
+            inputMode="none"
+            readOnly
             className="input text-lg font-semibold"
             value={cashInput}
-            onChange={(e) => setCashInput(e.target.value)}
             autoFocus
           />
           <div className="mt-2 flex flex-wrap gap-2">
             {QUICK_CASH.map((v) => (
               <button
                 key={v}
-                onClick={() => setCashInput(String(Math.max(total, v)))}
+                type="button"
+                onClick={() => setCashPreset(String(Math.max(total, v)))}
                 className="rounded-md bg-slate-100 px-3 py-1 text-xs font-medium hover:bg-slate-200"
               >
                 ${v}
               </button>
             ))}
             <button
-              onClick={() => setCashInput(total.toFixed(2))}
+              type="button"
+              onClick={() => setCashPreset(total.toFixed(2))}
               className="rounded-md bg-slate-100 px-3 py-1 text-xs font-medium hover:bg-slate-200"
             >
               Exact
             </button>
           </div>
+          <VirtualKeyboard
+            mode="numeric"
+            value={cashInput}
+            onChange={setCashInput}
+            replaceOnNextKey={replaceOnNextKey}
+            onReplaceConsumed={() => setReplaceOnNextKey(false)}
+            className="mt-3"
+          />
         </div>
 
         <div className="mt-4 flex justify-between rounded-lg bg-emerald-50 p-3 text-emerald-900">

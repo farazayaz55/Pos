@@ -14,6 +14,7 @@ interface StaffPermissions {
   menu: boolean
   orders: boolean
   settings: boolean
+  receipt: boolean
   team: boolean
 }
 
@@ -52,12 +53,13 @@ const normalizePermissions = (input: unknown): StaffPermissions => {
     menu: !!src.menu,
     orders: !!src.orders,
     settings: !!src.settings,
+    receipt: !!src.receipt,
     team: !!src.team,
   }
 }
 
 const hasAnyPermission = (p: StaffPermissions): boolean =>
-  p.pos || p.menu || p.orders || p.settings || p.team
+  p.pos || p.menu || p.orders || p.settings || p.receipt || p.team
 
 const requireSuperAdmin = async (
   req: CallableRequest<unknown>,

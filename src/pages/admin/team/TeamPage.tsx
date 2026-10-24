@@ -93,6 +93,7 @@ const TeamPage = () => {
         menu: !!m.permissions?.menu,
         orders: !!m.permissions?.orders,
         settings: !!m.permissions?.settings,
+        receipt: !!m.permissions?.receipt,
         team: !!m.permissions?.team,
       },
       active: m.active !== false,
