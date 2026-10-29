@@ -262,6 +262,18 @@ async function tryReopenLocalDb(): Promise<boolean> {
   return reopenPromise
 }
 
+/** Open (and migrate) IndexedDB before subscriptions/cache writes race the upgrade. */
+export async function ensureLocalDbOpen(): Promise<void> {
+  try {
+    if (!localDb.isOpen()) {
+      await localDb.open()
+    }
+  } catch (e) {
+    console.warn('[localdb] ensureLocalDbOpen failed, attempting recovery', e)
+    await tryReopenLocalDb()
+  }
+}
+
 /**
  * Run a local DB op; on IndexedDB open/closed failures, try reopen (or recreate)
  * once, then give up without throwing when recovery fails.
@@ -500,19 +512,27 @@ export const clearCounterMeta = async (
   )
 }
 
+/**
+ * Day-state cache must not join ambient Dexie txs (e.g. orderOutbox liveQuery /
+ * meta counter writes) — otherwise: "Table dayStateCache not part of transaction".
+ */
 export const saveDayStateCache = async (
   companyId: string,
   branchId: string,
   dayState: DayState,
 ) => {
   await withLocalDb(() =>
-    localDb.dayStateCache.put({
-      cacheKey: branchCacheKey(companyId, branchId),
-      companyId,
-      branchId,
-      dayState,
-      updatedAt: Date.now(),
-    }),
+    Dexie.ignoreTransaction(() =>
+      localDb.transaction('rw', localDb.dayStateCache, () =>
+        localDb.dayStateCache.put({
+          cacheKey: branchCacheKey(companyId, branchId),
+          companyId,
+          branchId,
+          dayState,
+          updatedAt: Date.now(),
+        }),
+      ),
+    ),
   )
 }
 
@@ -521,7 +541,11 @@ export const getDayStateCache = async (
   branchId: string,
 ): Promise<DayState | null> => {
   const row = await withLocalDb(() =>
-    localDb.dayStateCache.get(branchCacheKey(companyId, branchId)),
+    Dexie.ignoreTransaction(() =>
+      localDb.transaction('r', localDb.dayStateCache, () =>
+        localDb.dayStateCache.get(branchCacheKey(companyId, branchId)),
+      ),
+    ),
   )
   return row?.dayState ?? null
 }
