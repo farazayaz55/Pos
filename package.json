@@ -1,7 +1,7 @@
 {
   "name": "pos-mvp",
   "private": true,
-  "version": "0.1.15",
+  "version": "0.1.16",
   "type": "module",
   "main": "electron-dist/main.js",
   "scripts": {
