@@ -25,7 +25,8 @@ const QUICK_CASH = [10, 20, 50, 100]
 const CheckoutModal = ({ open, onClose }: Props) => {
   const user = useAuthStore((s) => s.user)
   const companyId = useCompanyContextStore((s) => s.activeCompanyId)
-  const { components } = useCompanyTaxSettings(companyId || undefined)
+  const branchId = useCompanyContextStore((s) => s.activeBranchId)
+  const { components } = useCompanyTaxSettings(companyId || undefined, branchId || undefined)
   const { company } = useCompany(companyId || undefined)
   const { isOnline } = useOnlineStatus()
   const lines = useCartStore((s) => s.lines)
@@ -71,8 +72,8 @@ const CheckoutModal = ({ open, onClose }: Props) => {
   if (!open) return null
 
   const handleSubmit = async () => {
-    if (!companyId || !user) {
-      toast.error('Missing company context')
+    if (!companyId || !branchId || !user) {
+      toast.error('Missing company or branch context')
       return
     }
     if (lines.length === 0) {
@@ -97,6 +98,7 @@ const CheckoutModal = ({ open, onClose }: Props) => {
       const order = isEditing
         ? await placeCashOrderUpdate({
             companyId,
+            branchId,
             orderId: editingOrderId,
             updatedBy: user.uid,
             updatedByName: user.name,
@@ -107,6 +109,7 @@ const CheckoutModal = ({ open, onClose }: Props) => {
           })
         : await placeCashOrder({
             companyId,
+            branchId,
             createdBy: user.uid,
             createdByName: user.name,
             lines,

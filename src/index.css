@@ -79,7 +79,14 @@
     display: none !important;
   }
 
-  #receipt {
+  #receipt,
+  #kitchen-receipt {
+    display: none !important;
+  }
+
+  html:not([data-print-target='kitchen']) #receipt,
+  html[data-print-target='receipt'] #receipt,
+  html[data-print-target='kitchen'] #kitchen-receipt {
     display: block !important;
     width: 80mm !important;
     max-width: 80mm !important;

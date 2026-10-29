@@ -16,10 +16,13 @@ let suppressCartPublishUntil = 0
 /**
  * Opens the customer display when enabled and publishes live cart snapshots over IPC.
  */
-export const useCustomerDisplaySync = (companyId: string) => {
+export const useCustomerDisplaySync = (
+  companyId: string,
+  branchId: string | undefined,
+) => {
   const enabled = usePosSettingsStore((s) => s.customerDisplayEnabled)
   const displayId = usePosSettingsStore((s) => s.customerDisplayId)
-  const { components } = useCompanyTaxSettings(companyId || undefined)
+  const { components } = useCompanyTaxSettings(companyId || undefined, branchId)
   const { company } = useCompany(companyId)
   const componentsRef = useRef(components)
   const companyRef = useRef(company)

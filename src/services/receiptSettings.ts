@@ -6,8 +6,8 @@ import {
   parseReceiptSettingsPayload,
 } from '@/utils/receiptBlocks'
 
-export const receiptSettingsRef = (companyId: string) =>
-  ref(db, `receiptSettings/${companyId}`)
+export const receiptSettingsRef = (companyId: string, branchId: string) =>
+  ref(db, `receiptSettings/${companyId}/${branchId}`)
 
 export type ReceiptSettingsError = {
   code?: string
@@ -16,14 +16,15 @@ export type ReceiptSettingsError = {
 
 export const subscribeReceiptSettings = (
   companyId: string,
+  branchId: string,
   cb: (settings: CompanyReceiptSettings | null) => void,
   onError?: (error: ReceiptSettingsError) => void,
 ) => {
   return onValue(
-    receiptSettingsRef(companyId),
+    receiptSettingsRef(companyId, branchId),
     (snap) => {
-      const val = snap.val() as Omit<CompanyReceiptSettings, 'companyId'> | null
-      cb(parseReceiptSettingsPayload(companyId, val))
+      const val = snap.val() as Omit<CompanyReceiptSettings, 'companyId' | 'branchId'> | null
+      cb(parseReceiptSettingsPayload(companyId, branchId, val))
     },
     (err) => {
       onError?.({
@@ -37,21 +38,23 @@ export const subscribeReceiptSettings = (
 
 export const getReceiptSettings = async (
   companyId: string,
+  branchId: string,
 ): Promise<CompanyReceiptSettings | null> => {
-  const snap = await get(receiptSettingsRef(companyId))
-  const val = snap.val() as Omit<CompanyReceiptSettings, 'companyId'> | null
-  return parseReceiptSettingsPayload(companyId, val)
+  const snap = await get(receiptSettingsRef(companyId, branchId))
+  const val = snap.val() as Omit<CompanyReceiptSettings, 'companyId' | 'branchId'> | null
+  return parseReceiptSettingsPayload(companyId, branchId, val)
 }
 
 export const saveReceiptSettings = async (
   companyId: string,
+  branchId: string,
   blocks: ReceiptBlock[],
   updatedBy: string,
 ): Promise<void> => {
-  const payload: Omit<CompanyReceiptSettings, 'companyId'> = {
+  const payload: Omit<CompanyReceiptSettings, 'companyId' | 'branchId'> = {
     blocks: cleanReceiptBlocksForSave(blocks),
     updatedAt: Date.now(),
     updatedBy,
   }
-  await set(receiptSettingsRef(companyId), payload)
+  await set(receiptSettingsRef(companyId, branchId), payload)
 }

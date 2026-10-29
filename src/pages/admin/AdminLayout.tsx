@@ -1,10 +1,11 @@
-import { useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { NavLink, Navigate, Outlet, useNavigate } from 'react-router-dom'
 import toast from 'react-hot-toast'
 import { useAuthStore, OFFLINE_SIGNOUT_MESSAGE } from '@/stores/authStore'
 import { useCompanyContextStore } from '@/stores/companyContextStore'
 import { usePosKioskStore } from '@/stores/posKioskStore'
 import { useCompany } from '@/hooks/useCompany'
+import { useBranches } from '@/hooks/useBranches'
 import { useOnlineStatus } from '@/hooks/useOnlineStatus'
 import { useOrderSync } from '@/hooks/useOrderSync'
 import { can, defaultAdminPath } from '@/utils/permissions'
@@ -71,6 +72,17 @@ const ICON = {
       <path d="M14 19c.3-2 1.8-3.5 4-4 1.5.4 3 1.5 3 4" />
     </svg>
   ),
+  branches: (
+    <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth={1.8}>
+      <path d="M3 21h18M6 21V9l6-4 6 4v12M9 21v-6h6v6" />
+    </svg>
+  ),
+  reports: (
+    <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth={1.8}>
+      <path d="M6 4h9l3 3v13H6V4Z" />
+      <path d="M9 10h6M9 14h6M9 18h4" />
+    </svg>
+  ),
 }
 
 const AdminLayout = () => {
@@ -78,13 +90,65 @@ const AdminLayout = () => {
   const signOut = useAuthStore((s) => s.signOut)
   const navigate = useNavigate()
   const activeCompanyId = useCompanyContextStore((s) => s.activeCompanyId)
+  const activeBranchId = useCompanyContextStore((s) => s.activeBranchId)
+  const setActiveBranch = useCompanyContextStore((s) => s.setActiveBranch)
   const isImpersonating = useCompanyContextStore((s) => s.isImpersonating)
   const clearContext = useCompanyContextStore((s) => s.clear)
   const kioskActive = usePosKioskStore((s) => s.active)
   const { company } = useCompany(activeCompanyId || undefined)
+  const { branches, loading: branchesLoading } = useBranches(activeCompanyId || undefined)
   const { isOnline } = useOnlineStatus()
-  useOrderSync(activeCompanyId || undefined)
+  useOrderSync(activeCompanyId || undefined, activeBranchId || undefined)
   const [sidebarOpen, setSidebarOpen] = useState(false)
+
+  const canSwitchBranch = user?.role === 'super_admin' || user?.role === 'admin'
+  const canManageBranches = canSwitchBranch
+
+  const activeBranch = useMemo(
+    () => branches.find((b) => b.id === activeBranchId) ?? null,
+    [branches, activeBranchId],
+  )
+
+  useEffect(() => {
+    if (!activeCompanyId || branchesLoading) return
+
+    if (user?.role === 'staff') {
+      const staffBranch =
+        user.branchId ||
+        branches.find((b) => b.active !== false)?.id ||
+        branches[0]?.id ||
+        null
+      if (staffBranch && activeBranchId !== staffBranch) {
+        setActiveBranch(staffBranch)
+      }
+      return
+    }
+
+    if (!canSwitchBranch) return
+
+    const activeList = branches.filter((b) => b.active !== false)
+    const pick =
+      activeList[0]?.id ||
+      branches[0]?.id ||
+      null
+
+    if (!pick) return
+
+    const currentValid =
+      activeBranchId && branches.some((b) => b.id === activeBranchId)
+    if (!currentValid) {
+      setActiveBranch(pick)
+    }
+  }, [
+    activeCompanyId,
+    activeBranchId,
+    branches,
+    branchesLoading,
+    canSwitchBranch,
+    setActiveBranch,
+    user?.role,
+    user?.branchId,
+  ])
 
   if (!user) return null
 
@@ -126,7 +190,11 @@ const AdminLayout = () => {
     { to: '/admin/menu/items', label: 'Items', icon: ICON.menu, permission: 'menu' },
     { to: '/admin/menu/modifiers', label: 'Modifiers', icon: ICON.mods, permission: 'menu' },
     { to: '/admin/orders', label: 'Orders', icon: ICON.orders, permission: 'orders' },
+    { to: '/admin/reports', label: 'Reports', icon: ICON.reports, permission: 'reports' },
     { to: '/admin/settings', label: 'Settings', icon: ICON.settings, permission: 'settings' },
+    ...(canManageBranches
+      ? [{ to: '/admin/branches', label: 'Branches', icon: ICON.branches, permission: 'settings' as const }]
+      : []),
     { to: '/admin/team', label: 'Team', icon: ICON.team, permission: 'team' },
   ]
   const items = allItems.filter((it) => {
@@ -156,12 +224,19 @@ const AdminLayout = () => {
   }
 
   const openDisplay = () => {
-    if (!activeCompanyId) return
-    if (window.posDesktop) {
-      void window.posDesktop.openDisplay(activeCompanyId)
+    if (!activeCompanyId || !activeBranchId) {
+      toast.error('Select a branch first')
       return
     }
-    window.open(`/display/${activeCompanyId}`, '_blank', 'noopener,noreferrer')
+    if (window.posDesktop) {
+      void window.posDesktop.openDisplay(activeCompanyId, activeBranchId)
+      return
+    }
+    window.open(
+      `/display/${activeCompanyId}/${activeBranchId}`,
+      '_blank',
+      'noopener,noreferrer',
+    )
   }
 
   return (
@@ -191,11 +266,29 @@ const AdminLayout = () => {
               </span>
             )}
           </div>
-          <div className="min-w-0">
+          <div className="min-w-0 flex-1">
             <p className="truncate text-sm font-semibold text-slate-900">
               {company?.name || 'Company'}
             </p>
-            <p className="truncate text-xs text-slate-500">{company?.location || ''}</p>
+            <p className="truncate text-xs text-slate-500">
+              {activeBranch?.name || activeBranch?.location || company?.location || ''}
+            </p>
+            {canSwitchBranch && branches.length > 0 && (
+              <select
+                className="mt-1.5 w-full rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700"
+                value={activeBranchId || ''}
+                disabled={branchesLoading}
+                onChange={(e) => setActiveBranch(e.target.value || null)}
+              >
+                {!activeBranchId && <option value="">Select branch…</option>}
+                {branches.map((b) => (
+                  <option key={b.id} value={b.id}>
+                    {b.name}
+                    {b.active === false ? ' (inactive)' : ''}
+                  </option>
+                ))}
+              </select>
+            )}
           </div>
         </div>
 

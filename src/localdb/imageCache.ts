@@ -1,4 +1,4 @@
-import { localDb } from '@/localdb/db'
+import { localDb, withLocalDb } from '@/localdb/db'
 import type { Category, Company, MenuItem } from '@/types'
 
 /** In-memory object URLs so we don't recreate them every render. */
@@ -36,8 +36,14 @@ export const imageCacheKey = (url: string): string => {
 const canAttemptDownload = () =>
   typeof navigator === 'undefined' ? true : navigator.onLine
 
-export const getCachedImageRow = (url: string) =>
-  localDb.imageCache.get(imageCacheKey(url))
+export const getCachedImageRow = async (url: string) => {
+  try {
+    return await withLocalDb(() => localDb.imageCache.get(imageCacheKey(url)))
+  } catch (e) {
+    console.warn('[imageCache] getCachedImageRow failed', e)
+    return undefined
+  }
+}
 
 const rowToObjectUrl = (key: string, bytes: ArrayBuffer, contentType: string) => {
   const existing = objectUrls.get(key)
@@ -56,9 +62,14 @@ export const getCachedObjectUrl = async (
   const key = imageCacheKey(url)
   const existing = objectUrls.get(key)
   if (existing) return existing
-  const row = await getCachedImageRow(url)
-  if (!row?.bytes || !(row.bytes.byteLength > 0)) return null
-  return rowToObjectUrl(key, row.bytes, contentTypeOrDefault(row.contentType))
+  try {
+    const row = await getCachedImageRow(url)
+    if (!row?.bytes || !(row.bytes.byteLength > 0)) return null
+    return rowToObjectUrl(key, row.bytes, contentTypeOrDefault(row.contentType))
+  } catch (e) {
+    console.warn('[imageCache] getCachedObjectUrl failed', e)
+    return null
+  }
 }
 
 const contentTypeOrDefault = (t?: string) => t || 'image/jpeg'
@@ -71,13 +82,19 @@ const rememberBytes = async (
 ): Promise<void> => {
   const key = imageCacheKey(url)
   const copy = bytes.slice(0)
-  await localDb.imageCache.put({
-    url: key,
-    bytes: copy,
-    contentType: contentTypeOrDefault(contentType),
-    companyId,
-    updatedAt: Date.now(),
-  })
+  try {
+    await withLocalDb(() =>
+      localDb.imageCache.put({
+        url: key,
+        bytes: copy,
+        contentType: contentTypeOrDefault(contentType),
+        companyId,
+        updatedAt: Date.now(),
+      }),
+    )
+  } catch (e) {
+    console.warn('[imageCache] rememberBytes failed', e)
+  }
   const prev = objectUrls.get(key)
   if (prev) URL.revokeObjectURL(prev)
   objectUrls.delete(key)
@@ -166,33 +183,38 @@ export const ensureImageCached = async (
 
   const key = imageCacheKey(url)
 
-  if (!options?.force) {
-    const existing = await getCachedImageRow(url)
-    if (existing?.bytes && existing.bytes.byteLength > 0) {
-      rowToObjectUrl(key, existing.bytes, contentTypeOrDefault(existing.contentType))
-      return true
+  try {
+    if (!options?.force) {
+      const existing = await getCachedImageRow(url)
+      if (existing?.bytes && existing.bytes.byteLength > 0) {
+        rowToObjectUrl(key, existing.bytes, contentTypeOrDefault(existing.contentType))
+        return true
+      }
     }
+
+    const pending = inflight.get(key)
+    if (pending) return pending
+
+    const work = (async () => {
+      try {
+        const { bytes, contentType } = await downloadImageBytes(url)
+        if (!bytes.byteLength) return false
+        await rememberBytes(url, bytes, contentType, companyId)
+        return true
+      } catch (err) {
+        console.warn('[imageCache] failed to cache', url, err)
+        return false
+      } finally {
+        inflight.delete(key)
+      }
+    })()
+
+    inflight.set(key, work)
+    return work
+  } catch (err) {
+    console.warn('[imageCache] ensureImageCached failed', url, err)
+    return false
   }
-
-  const pending = inflight.get(key)
-  if (pending) return pending
-
-  const work = (async () => {
-    try {
-      const { bytes, contentType } = await downloadImageBytes(url)
-      if (!bytes.byteLength) return false
-      await rememberBytes(url, bytes, contentType, companyId)
-      return true
-    } catch (err) {
-      console.warn('[imageCache] failed to cache', url, err)
-      return false
-    } finally {
-      inflight.delete(key)
-    }
-  })()
-
-  inflight.set(key, work)
-  return work
 }
 
 export const prefetchImageUrls = async (
@@ -240,4 +262,10 @@ export const prefetchMenuImages = async (
   await prefetchImageUrls(collectMenuImageUrls(categories, items, company), companyId)
 }
 
-export const countCachedImages = () => localDb.imageCache.count()
+export const countCachedImages = async () => {
+  try {
+    return (await withLocalDb(() => localDb.imageCache.count())) ?? 0
+  } catch {
+    return 0
+  }
+}

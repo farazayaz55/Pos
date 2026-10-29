@@ -16,6 +16,7 @@ interface StaffPermissions {
   settings: boolean
   receipt: boolean
   team: boolean
+  reports: boolean
 }
 
 interface SuperAdminCheck {
@@ -31,6 +32,7 @@ interface CompanyManagerCheck {
 interface RtdbUser {
   role?: string
   companyId?: string
+  branchId?: string
   permissions?: StaffPermissions
   active?: boolean
   name?: string
@@ -41,9 +43,20 @@ interface TeamRosterEntry {
   name: string
   email: string
   role: 'admin' | 'staff'
+  branchId?: string
   permissions?: StaffPermissions
   createdAt: number
   active: boolean
+}
+
+interface BranchRecord {
+  companyId: string
+  name: string
+  location: string
+  phone?: string
+  active: boolean
+  createdAt: number
+  createdBy: string
 }
 
 const normalizePermissions = (input: unknown): StaffPermissions => {
@@ -55,11 +68,12 @@ const normalizePermissions = (input: unknown): StaffPermissions => {
     settings: !!src.settings,
     receipt: !!src.receipt,
     team: !!src.team,
+    reports: !!src.reports,
   }
 }
 
 const hasAnyPermission = (p: StaffPermissions): boolean =>
-  p.pos || p.menu || p.orders || p.settings || p.receipt || p.team
+  p.pos || p.menu || p.orders || p.settings || p.receipt || p.team || p.reports
 
 const requireSuperAdmin = async (
   req: CallableRequest<unknown>,
@@ -133,6 +147,7 @@ interface CreateCompanyAdminInput {
 interface CreateCompanyAdminResult {
   companyId: string
   adminUid: string
+  branchId: string
 }
 
 export const createCompanyAdmin = onCall<CreateCompanyAdminInput, Promise<CreateCompanyAdminResult>>(
@@ -172,6 +187,8 @@ export const createCompanyAdmin = onCall<CreateCompanyAdminInput, Promise<Create
 
     const companyRef = db.ref('companies').push()
     const companyId = companyRef.key!
+    const branchRef = db.ref(`companies/${companyId}/branches`).push()
+    const branchId = branchRef.key!
     const now = Date.now()
 
     await auth.setCustomUserClaims(userRecord.uid, {
@@ -187,6 +204,16 @@ export const createCompanyAdmin = onCall<CreateCompanyAdminInput, Promise<Create
       active: true,
     }
 
+    const branch: BranchRecord = {
+      companyId,
+      name: location.trim() || 'Main',
+      location: location.trim(),
+      active: true,
+      createdAt: now,
+      createdBy: caller.uid,
+      ...(phone ? { phone } : {}),
+    }
+
     const company = {
       name: companyName,
       location,
@@ -198,6 +225,9 @@ export const createCompanyAdmin = onCall<CreateCompanyAdminInput, Promise<Create
       createdBy: caller.uid,
       team: {
         [userRecord.uid]: teamEntry,
+      },
+      branches: {
+        [branchId]: branch,
       },
       ...(phone ? { phone } : {}),
       ...(logoUrl ? { logoUrl } : {}),
@@ -218,7 +248,7 @@ export const createCompanyAdmin = onCall<CreateCompanyAdminInput, Promise<Create
       [`users/${userRecord.uid}`]: userRecordDb,
     })
 
-    return { companyId, adminUid: userRecord.uid }
+    return { companyId, adminUid: userRecord.uid, branchId }
   },
 )
 
@@ -265,6 +295,7 @@ export const deleteCompany = onCall<DeleteCompanyInput, Promise<{ ok: true }>>(
       [`orders/${companyId}`]: null,
       [`counters/${companyId}`]: null,
       [`taxSettings/${companyId}`]: null,
+      [`receiptSettings/${companyId}`]: null,
     }
     for (const uid of teamUids) {
       updates[`users/${uid}`] = null
@@ -335,8 +366,57 @@ export const setSuperAdminClaim = onCall<Record<string, never>, Promise<{ ok: tr
   },
 )
 
+/** Re-sync Auth custom claims from the caller's RTDB user record (incl. branchId). */
+export const syncMyClaims = onCall<Record<string, never>, Promise<{ ok: true }>>(
+  async (req) => {
+    const uid = req.auth?.uid
+    if (!uid) throw new HttpsError('unauthenticated', 'Sign-in required.')
+
+    const snap = await db.ref(`users/${uid}`).get()
+    const data = snap.val() as RtdbUser | null
+    if (!data?.role) {
+      throw new HttpsError('not-found', 'User profile not found.')
+    }
+
+    if (data.role === 'super_admin') {
+      await auth.setCustomUserClaims(uid, { role: 'super_admin' })
+      return { ok: true }
+    }
+
+    if (data.role === 'admin') {
+      if (!data.companyId) {
+        throw new HttpsError('failed-precondition', 'Admin missing companyId.')
+      }
+      await auth.setCustomUserClaims(uid, {
+        role: 'admin',
+        companyId: data.companyId,
+      })
+      return { ok: true }
+    }
+
+    if (data.role === 'staff') {
+      if (!data.companyId || !data.branchId) {
+        throw new HttpsError(
+          'failed-precondition',
+          'Staff missing companyId or branchId.',
+        )
+      }
+      await auth.setCustomUserClaims(uid, {
+        role: 'staff',
+        companyId: data.companyId,
+        branchId: data.branchId,
+        permissions: normalizePermissions(data.permissions),
+      })
+      return { ok: true }
+    }
+
+    throw new HttpsError('failed-precondition', 'Unsupported role.')
+  },
+)
+
 interface CreateTeamMemberInput {
   companyId: string
+  branchId: string
   name: string
   email: string
   password: string
@@ -349,13 +429,16 @@ interface CreateTeamMemberResult {
 
 export const createTeamMember = onCall<CreateTeamMemberInput, Promise<CreateTeamMemberResult>>(
   async (req) => {
-    const { companyId, name, email, password, permissions: rawPerms } =
+    const { companyId, branchId, name, email, password, permissions: rawPerms } =
       req.data || ({} as CreateTeamMemberInput)
 
     await requireCompanyManager(req, companyId)
 
     if (!name?.trim() || !email?.trim() || !password) {
       throw new HttpsError('invalid-argument', 'Missing required fields.')
+    }
+    if (!branchId) {
+      throw new HttpsError('invalid-argument', 'branchId is required for staff.')
     }
     if (password.length < 6) {
       throw new HttpsError('invalid-argument', 'Password must be at least 6 characters.')
@@ -369,6 +452,11 @@ export const createTeamMember = onCall<CreateTeamMemberInput, Promise<CreateTeam
     const compSnap = await db.ref(`companies/${companyId}`).get()
     if (!compSnap.exists()) {
       throw new HttpsError('not-found', 'Company not found.')
+    }
+
+    const branchSnap = await db.ref(`companies/${companyId}/branches/${branchId}`).get()
+    if (!branchSnap.exists()) {
+      throw new HttpsError('not-found', 'Branch not found.')
     }
 
     let userRecord: admin.auth.UserRecord
@@ -390,6 +478,7 @@ export const createTeamMember = onCall<CreateTeamMemberInput, Promise<CreateTeam
     await auth.setCustomUserClaims(userRecord.uid, {
       role: 'staff',
       companyId,
+      branchId,
       permissions,
     })
 
@@ -398,6 +487,7 @@ export const createTeamMember = onCall<CreateTeamMemberInput, Promise<CreateTeam
       name: name.trim(),
       role: 'staff' as const,
       companyId,
+      branchId,
       password,
       permissions,
       active: true,
@@ -408,6 +498,7 @@ export const createTeamMember = onCall<CreateTeamMemberInput, Promise<CreateTeam
       name: name.trim(),
       email: email.trim(),
       role: 'staff',
+      branchId,
       permissions,
       createdAt: now,
       active: true,
@@ -429,11 +520,12 @@ interface UpdateTeamMemberInput {
   password?: string
   permissions?: StaffPermissions
   active?: boolean
+  branchId?: string
 }
 
 export const updateTeamMember = onCall<UpdateTeamMemberInput, Promise<{ ok: true }>>(
   async (req) => {
-    const { companyId, uid, name, password, permissions: rawPerms, active } =
+    const { companyId, uid, name, password, permissions: rawPerms, active, branchId } =
       req.data || ({} as UpdateTeamMemberInput)
 
     await requireCompanyManager(req, companyId)
@@ -455,6 +547,21 @@ export const updateTeamMember = onCall<UpdateTeamMemberInput, Promise<{ ok: true
     const existing = userSnap.val() as RtdbUser | null
     if (!existing || existing.companyId !== companyId || existing.role !== 'staff') {
       throw new HttpsError('not-found', 'Team member not found.')
+    }
+
+    let nextBranchId = existing.branchId
+    if (branchId !== undefined) {
+      if (!branchId) {
+        throw new HttpsError('invalid-argument', 'branchId is required for staff.')
+      }
+      const branchSnap = await db.ref(`companies/${companyId}/branches/${branchId}`).get()
+      if (!branchSnap.exists()) {
+        throw new HttpsError('not-found', 'Branch not found.')
+      }
+      nextBranchId = branchId
+    }
+    if (!nextBranchId) {
+      throw new HttpsError('failed-precondition', 'Staff member has no branch assigned.')
     }
 
     const authUpdates: { displayName?: string; password?: string; disabled?: boolean } = {}
@@ -486,6 +593,7 @@ export const updateTeamMember = onCall<UpdateTeamMemberInput, Promise<{ ok: true
     await auth.setCustomUserClaims(uid, {
       role: 'staff',
       companyId,
+      branchId: nextBranchId,
       permissions,
     })
 
@@ -494,6 +602,8 @@ export const updateTeamMember = onCall<UpdateTeamMemberInput, Promise<{ ok: true
       [`companies/${companyId}/team/${uid}/permissions`]: permissions,
       [`users/${uid}/active`]: nextActive,
       [`companies/${companyId}/team/${uid}/active`]: nextActive,
+      [`users/${uid}/branchId`]: nextBranchId,
+      [`companies/${companyId}/team/${uid}/branchId`]: nextBranchId,
     }
     if (name?.trim()) {
       rtdbUpdates[`users/${uid}/name`] = name.trim()
@@ -557,6 +667,154 @@ export const deleteTeamMember = onCall<DeleteTeamMemberInput, Promise<{ ok: true
   },
 )
 
+interface CreateBranchInput {
+  companyId: string
+  sourceBranchId: string
+  name: string
+  location: string
+  phone?: string
+}
+
+interface CreateBranchResult {
+  branchId: string
+}
+
+export const createBranch = onCall<CreateBranchInput, Promise<CreateBranchResult>>(
+  async (req) => {
+    const { companyId, sourceBranchId, name, location, phone } =
+      req.data || ({} as CreateBranchInput)
+    const caller = await requireCompanyManager(req, companyId)
+
+    // Staff with team permission cannot create branches — company admin / super_admin only
+    if (caller.role === 'staff') {
+      throw new HttpsError('permission-denied', 'Company admin required to create branches.')
+    }
+
+    if (!companyId || !sourceBranchId || !name?.trim() || !location?.trim()) {
+      throw new HttpsError('invalid-argument', 'Missing required fields.')
+    }
+
+    const sourceSnap = await db
+      .ref(`companies/${companyId}/branches/${sourceBranchId}`)
+      .get()
+    if (!sourceSnap.exists()) {
+      throw new HttpsError('not-found', 'Source branch not found.')
+    }
+
+    const newRef = db.ref(`companies/${companyId}/branches`).push()
+    const branchId = newRef.key!
+    const now = Date.now()
+
+    const branch: BranchRecord = {
+      companyId,
+      name: name.trim(),
+      location: location.trim(),
+      active: true,
+      createdAt: now,
+      createdBy: caller.uid,
+      ...(phone?.trim() ? { phone: phone.trim() } : {}),
+    }
+
+    const updates: Record<string, unknown> = {
+      [`companies/${companyId}/branches/${branchId}`]: branch,
+    }
+
+    const [menuSnap, taxSnap, receiptSnap] = await Promise.all([
+      db.ref(`menu/${companyId}/${sourceBranchId}`).get(),
+      db.ref(`taxSettings/${companyId}/${sourceBranchId}`).get(),
+      db.ref(`receiptSettings/${companyId}/${sourceBranchId}`).get(),
+    ])
+
+    const menuVal = menuSnap.val() as {
+      categories?: Record<string, Record<string, unknown>>
+      items?: Record<string, Record<string, unknown>>
+      modifierGroups?: Record<string, Record<string, unknown>>
+    } | null
+
+    if (menuVal?.categories) {
+      for (const [id, cat] of Object.entries(menuVal.categories)) {
+        updates[`menu/${companyId}/${branchId}/categories/${id}`] = {
+          ...cat,
+          companyId,
+          branchId,
+        }
+      }
+    }
+    if (menuVal?.items) {
+      for (const [id, item] of Object.entries(menuVal.items)) {
+        updates[`menu/${companyId}/${branchId}/items/${id}`] = {
+          ...item,
+          companyId,
+          branchId,
+        }
+      }
+    }
+    if (menuVal?.modifierGroups) {
+      for (const [id, g] of Object.entries(menuVal.modifierGroups)) {
+        updates[`menu/${companyId}/${branchId}/modifierGroups/${id}`] = {
+          ...g,
+          companyId,
+          branchId,
+        }
+      }
+    }
+
+    const taxVal = taxSnap.val()
+    if (taxVal) {
+      updates[`taxSettings/${companyId}/${branchId}`] = taxVal
+    }
+
+    const receiptVal = receiptSnap.val()
+    if (receiptVal) {
+      updates[`receiptSettings/${companyId}/${branchId}`] = receiptVal
+    }
+
+    await db.ref().update(updates)
+    return { branchId }
+  },
+)
+
+interface DeleteBranchInput {
+  companyId: string
+  branchId: string
+}
+
+export const deleteBranch = onCall<DeleteBranchInput, Promise<{ ok: true }>>(
+  async (req) => {
+    const { companyId, branchId } = req.data || ({} as DeleteBranchInput)
+    const caller = await requireCompanyManager(req, companyId)
+
+    if (caller.role === 'staff') {
+      throw new HttpsError('permission-denied', 'Company admin required to delete branches.')
+    }
+    if (!companyId || !branchId) {
+      throw new HttpsError('invalid-argument', 'companyId and branchId are required.')
+    }
+
+    const branchesSnap = await db.ref(`companies/${companyId}/branches`).get()
+    const branches = branchesSnap.val() as Record<string, unknown> | null
+    if (!branches || !branches[branchId]) {
+      throw new HttpsError('not-found', 'Branch not found.')
+    }
+    if (Object.keys(branches).length <= 1) {
+      throw new HttpsError('failed-precondition', 'Cannot delete the last branch.')
+    }
+
+    await db.ref().update({
+      [`companies/${companyId}/branches/${branchId}`]: null,
+      [`menu/${companyId}/${branchId}`]: null,
+      [`orders/${companyId}/${branchId}`]: null,
+      [`counters/${companyId}/${branchId}`]: null,
+      [`taxSettings/${companyId}/${branchId}`]: null,
+      [`receiptSettings/${companyId}/${branchId}`]: null,
+      [`dayState/${companyId}/${branchId}`]: null,
+      [`zReports/${companyId}/${branchId}`]: null,
+    })
+
+    return { ok: true }
+  },
+)
+
 export {
   getTerminalConnectionToken,
   createKioskPaymentIntent,
@@ -564,3 +822,5 @@ export {
   getKioskOrder,
   refundOrder,
 } from './payments'
+
+export { closeBusinessDay } from './dayClose'

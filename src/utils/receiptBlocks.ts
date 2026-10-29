@@ -193,7 +193,8 @@ export const resolveReceiptBlocks = (
 
 export const parseReceiptSettingsPayload = (
   companyId: string,
-  val: Omit<CompanyReceiptSettings, 'companyId'> | null,
+  branchId: string,
+  val: Omit<CompanyReceiptSettings, 'companyId' | 'branchId'> | null,
 ): CompanyReceiptSettings | null => {
   if (!val) return null
   const blocks = normalizeBlocks(val.blocks)
@@ -201,6 +202,7 @@ export const parseReceiptSettingsPayload = (
   const footerLines = normalizeLegacyLines(val.footerLines)
   return {
     companyId,
+    branchId,
     blocks:
       blocks.length > 0
         ? blocks

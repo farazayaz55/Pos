@@ -9,7 +9,10 @@ import { prefetchMenuImages } from '@/localdb/imageCache'
 import { useOnlineStatus } from '@/hooks/useOnlineStatus'
 import type { Category, MenuItem, ModifierGroup } from '@/types'
 
-export const useCompanyMenu = (companyId: string | undefined) => {
+export const useCompanyMenu = (
+  companyId: string | undefined,
+  branchId: string | undefined,
+) => {
   const { isOnline } = useOnlineStatus()
   const [categories, setCategories] = useState<Category[]>([])
   const [items, setItems] = useState<MenuItem[]>([])
@@ -24,7 +27,7 @@ export const useCompanyMenu = (companyId: string | undefined) => {
   })
 
   useEffect(() => {
-    if (!companyId) {
+    if (!companyId || !branchId) {
       setCategories([])
       setItems([])
       setModifierGroups([])
@@ -41,7 +44,7 @@ export const useCompanyMenu = (companyId: string | undefined) => {
     latest.current = { categories: [], items: [], modifierGroups: [] }
 
     void (async () => {
-      const cached = await getMenuCache(companyId)
+      const cached = await getMenuCache(companyId, branchId)
       if (cancelled || !cached) return
       latest.current = {
         categories: cached.categories,
@@ -69,6 +72,7 @@ export const useCompanyMenu = (companyId: string | undefined) => {
       void (async () => {
         await saveMenuCache(
           companyId,
+          branchId,
           latest.current.categories,
           latest.current.items,
           latest.current.modifierGroups,
@@ -92,17 +96,17 @@ export const useCompanyMenu = (companyId: string | undefined) => {
       }
     }
 
-    const unsubCats = subscribeCategories(companyId, (v) => {
+    const unsubCats = subscribeCategories(companyId, branchId, (v) => {
       latest.current.categories = v
       setCategories(v)
       markReady()
     })
-    const unsubItems = subscribeItems(companyId, (v) => {
+    const unsubItems = subscribeItems(companyId, branchId, (v) => {
       latest.current.items = v
       setItems(v)
       markReady()
     })
-    const unsubGroups = subscribeModifierGroups(companyId, (v) => {
+    const unsubGroups = subscribeModifierGroups(companyId, branchId, (v) => {
       latest.current.modifierGroups = v
       setModifierGroups(v)
       markReady()
@@ -122,7 +126,7 @@ export const useCompanyMenu = (companyId: string | undefined) => {
       unsubItems()
       unsubGroups()
     }
-  }, [companyId])
+  }, [companyId, branchId])
 
   return {
     categories,

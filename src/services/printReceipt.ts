@@ -1,5 +1,13 @@
 import { usePosSettingsStore } from '@/stores/posSettingsStore'
-import type { CompanyReceiptSettings, Order } from '@/types'
+import type {
+  CompanyKitchenReceiptSettings,
+  CompanyReceiptSettings,
+  Order,
+} from '@/types'
+import {
+  formatKitchenReceiptPlainText,
+} from '@/utils/kitchenReceiptText'
+import type { KitchenItemLookup } from '@/utils/kitchenReceipt'
 import {
   formatReceiptPlainText,
   type ReceiptCompanyInfo,
@@ -54,7 +62,10 @@ function inlineComputedStyles(sourceRoot: HTMLElement, targetRoot: HTMLElement) 
   targetRoot.style.boxSizing = 'border-box'
 }
 
-async function buildReceiptPrintHtml(receipt: HTMLElement): Promise<{
+async function buildReceiptPrintHtml(
+  receipt: HTMLElement,
+  title = 'Receipt',
+): Promise<{
   html: string
   pageHeightMicrons: number
 }> {
@@ -86,7 +97,7 @@ async function buildReceiptPrintHtml(receipt: HTMLElement): Promise<{
   const contentHeightPx = Math.max(receipt.scrollHeight, receipt.offsetHeight, 120)
   const pageHeightMicrons = Math.round(contentHeightPx * PX_TO_MICRONS * 1.2 + 8_000)
 
-  const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Receipt</title>
+  const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${title}</title>
 <style>
   html, body { margin: 0; padding: 0; background: #fff; color: #000; }
   body {
@@ -100,6 +111,22 @@ async function buildReceiptPrintHtml(receipt: HTMLElement): Promise<{
 </head><body>${clone.outerHTML}</body></html>`
 
   return { html, pageHeightMicrons }
+}
+
+const waitForPaint = () =>
+  new Promise<void>((resolve) => {
+    requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
+  })
+
+const browserPrintTarget = async (target: 'receipt' | 'kitchen') => {
+  const root = document.documentElement
+  root.setAttribute('data-print-target', target)
+  await waitForPaint()
+  try {
+    window.print()
+  } finally {
+    root.removeAttribute('data-print-target')
+  }
 }
 
 export type PrintReceiptInput = {
@@ -117,7 +144,7 @@ export type PrintReceiptInput = {
 export async function printReceipt(input: PrintReceiptInput): Promise<void> {
   const desktop = window.posDesktop
   if (!desktop) {
-    window.print()
+    await browserPrintTarget('receipt')
     return
   }
 
@@ -133,9 +160,7 @@ export async function printReceipt(input: PrintReceiptInput): Promise<void> {
     throw new Error('Receipt is not ready to print')
   }
 
-  await new Promise<void>((resolve) => {
-    requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
-  })
+  await waitForPaint()
 
   const text = formatReceiptPlainText(
     input.order,
@@ -152,4 +177,62 @@ export async function printReceipt(input: PrintReceiptInput): Promise<void> {
   if (!result.success) {
     throw new Error(result.error || 'Print failed')
   }
+}
+
+export type PrintKitchenReceiptInput = {
+  order: Order
+  kitchenSettings?: CompanyKitchenReceiptSettings | null
+  menuByItemId?: Map<string, KitchenItemLookup> | Record<string, KitchenItemLookup>
+}
+
+/**
+ * Print the kitchen ticket on the same receipt printer.
+ * Returns false when there are no kitchen lines (nothing to print).
+ */
+export async function printKitchenReceipt(
+  input: PrintKitchenReceiptInput,
+): Promise<boolean> {
+  const text = formatKitchenReceiptPlainText(
+    input.order,
+    input.kitchenSettings,
+    input.menuByItemId,
+  )
+  if (!text) return false
+
+  const desktop = window.posDesktop
+  if (!desktop) {
+    const el = document.getElementById('kitchen-receipt')
+    if (!el) throw new Error('Kitchen receipt is not ready to print')
+    await browserPrintTarget('kitchen')
+    return true
+  }
+
+  const deviceName = usePosSettingsStore.getState().receiptPrinterName
+  if (!deviceName) {
+    throw new PrintConfigError(
+      'No receipt printer selected. Choose one in Settings before printing.',
+    )
+  }
+
+  const receipt = document.getElementById('kitchen-receipt')
+  if (!receipt) {
+    throw new Error('Kitchen receipt is not ready to print')
+  }
+
+  await waitForPaint()
+
+  const { html, pageHeightMicrons } = await buildReceiptPrintHtml(
+    receipt,
+    'Kitchen',
+  )
+  const result = await desktop.print({
+    deviceName,
+    text,
+    html,
+    pageHeightMicrons,
+  })
+  if (!result.success) {
+    throw new Error(result.error || 'Kitchen print failed')
+  }
+  return true
 }

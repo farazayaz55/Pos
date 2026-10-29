@@ -4,33 +4,36 @@ import { subscribeOrders } from '@/services/orders'
 import { localDb, setCounterMeta } from '@/localdb/db'
 import type { Order } from '@/types'
 
-export const useOrders = (companyId: string | undefined) => {
+export const useOrders = (
+  companyId: string | undefined,
+  branchId: string | undefined,
+) => {
   const [remoteOrders, setRemoteOrders] = useState<Order[]>([])
   const [localOrders, setLocalOrders] = useState<Order[]>([])
   const [remoteLoading, setRemoteLoading] = useState(true)
   const [localReady, setLocalReady] = useState(false)
 
   useEffect(() => {
-    if (!companyId) {
+    if (!companyId || !branchId) {
       setRemoteOrders([])
       setRemoteLoading(false)
       return
     }
     setRemoteLoading(true)
-    const unsub = subscribeOrders(companyId, (v) => {
+    const unsub = subscribeOrders(companyId, branchId, (v) => {
       setRemoteOrders(v)
       setRemoteLoading(false)
       for (const o of v) {
-        if (o.orderDate) {
-          void setCounterMeta(companyId, o.orderDate, o.orderNumber)
+        if (o.reportPeriodId) {
+          void setCounterMeta(companyId, branchId, o.reportPeriodId, o.orderNumber)
         }
       }
     })
     return () => unsub()
-  }, [companyId])
+  }, [companyId, branchId])
 
   useEffect(() => {
-    if (!companyId) {
+    if (!companyId || !branchId) {
       setLocalOrders([])
       setLocalReady(true)
       return
@@ -38,9 +41,9 @@ export const useOrders = (companyId: string | undefined) => {
     setLocalReady(false)
     const obs = liveQuery(() =>
       localDb.orderOutbox
-        .where('companyId')
-        .equals(companyId)
-        .filter((r) => r.syncStatus !== 'synced')
+        .where('branchId')
+        .equals(branchId)
+        .filter((r) => r.companyId === companyId && r.syncStatus !== 'synced')
         .toArray(),
     )
     const sub = obs.subscribe({
@@ -61,7 +64,7 @@ export const useOrders = (companyId: string | undefined) => {
       error: () => setLocalReady(true),
     })
     return () => sub.unsubscribe()
-  }, [companyId])
+  }, [companyId, branchId])
 
   const orders = useMemo(() => {
     const remoteLocalIds = new Set(

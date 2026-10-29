@@ -22,8 +22,10 @@ import CategoriesPage from '@/pages/admin/menu/CategoriesPage'
 import ItemsPage from '@/pages/admin/menu/ItemsPage'
 import ModifiersPage from '@/pages/admin/menu/ModifiersPage'
 import OrderHistoryPage from '@/pages/admin/orders/OrderHistoryPage'
+import XzReportsPage from '@/pages/admin/reports/XzReportsPage'
 import SettingsPage from '@/pages/admin/settings/SettingsPage'
 import TeamPage from '@/pages/admin/team/TeamPage'
+import BranchesPage from '@/pages/admin/branches/BranchesPage'
 
 import DisplayPage from '@/pages/display/DisplayPage'
 import CustomerDisplayPage from '@/pages/display/CustomerDisplayPage'
@@ -47,7 +49,11 @@ const App = () => {
       user.companyId &&
       activeCompanyId !== user.companyId
     ) {
-      setActiveCompany(user.companyId, false)
+      setActiveCompany(
+        user.companyId,
+        false,
+        user.role === 'staff' ? (user.branchId ?? null) : undefined,
+      )
     }
   }, [user, activeCompanyId, setActiveCompany])
 
@@ -68,7 +74,7 @@ const App = () => {
     <Routes>
       <Route path="/login" element={<LoginPage />} />
 
-      <Route path="/display/:companyId" element={<DisplayPage />} />
+      <Route path="/display/:companyId/:branchId" element={<DisplayPage />} />
       <Route path="/customer-display" element={<CustomerDisplayPage />} />
 
       <Route
@@ -143,6 +149,14 @@ const App = () => {
           }
         />
         <Route
+          path="reports"
+          element={
+            <PermissionGate permission="reports">
+              <XzReportsPage />
+            </PermissionGate>
+          }
+        />
+        <Route
           path="settings"
           element={
             <PermissionGate anyOf={['settings', 'receipt']}>
@@ -155,6 +169,14 @@ const App = () => {
           element={
             <PermissionGate permission="team">
               <TeamPage />
+            </PermissionGate>
+          }
+        />
+        <Route
+          path="branches"
+          element={
+            <PermissionGate permission="settings">
+              <BranchesPage />
             </PermissionGate>
           }
         />

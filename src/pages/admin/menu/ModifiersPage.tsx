@@ -1,7 +1,10 @@
 import { useState } from 'react'
 import toast from 'react-hot-toast'
+import { useAuthStore } from '@/stores/authStore'
 import { useCompanyContextStore } from '@/stores/companyContextStore'
 import { useCompanyMenu } from '@/hooks/useCompanyMenu'
+import type { BranchWriteScope } from '@/types'
+import BranchWriteScopeToggle from '@/components/common/BranchWriteScopeToggle'
 import {
   createModifierGroup,
   deleteModifierGroup,
@@ -24,8 +27,12 @@ interface GroupDraft {
 }
 
 const ModifiersPage = () => {
+  const user = useAuthStore((s) => s.user)
   const companyId = useCompanyContextStore((s) => s.activeCompanyId) || ''
-  const { modifierGroups, loading } = useCompanyMenu(companyId)
+  const branchId = useCompanyContextStore((s) => s.activeBranchId) || ''
+  const { modifierGroups, loading } = useCompanyMenu(companyId, branchId || undefined)
+  const [writeScope, setWriteScope] = useState<BranchWriteScope>('this')
+  const showScopeToggle = user?.role === 'admin' || user?.role === 'super_admin'
   const [editing, setEditing] = useState<GroupDraft | null>(null)
   const [optionFor, setOptionFor] = useState<{ groupId: string; option: ModifierOption } | null>(
     null,
@@ -45,24 +52,36 @@ const ModifiersPage = () => {
       toast.error('Name is required')
       return
     }
+    if (!branchId) return
     setSaving(true)
     try {
       if (editing.id) {
-        await updateModifierGroup(companyId, editing.id, {
-          name: editing.name.trim(),
-          required: editing.required,
-          min: editing.min,
-          max: editing.max,
-        })
+        await updateModifierGroup(
+          companyId,
+          branchId,
+          editing.id,
+          {
+            name: editing.name.trim(),
+            required: editing.required,
+            min: editing.min,
+            max: editing.max,
+          },
+          writeScope,
+        )
         toast.success('Group updated')
       } else {
-        await createModifierGroup(companyId, {
-          name: editing.name.trim(),
-          required: editing.required,
-          min: editing.min,
-          max: editing.max,
-          options: {},
-        })
+        await createModifierGroup(
+          companyId,
+          branchId,
+          {
+            name: editing.name.trim(),
+            required: editing.required,
+            min: editing.min,
+            max: editing.max,
+            options: {},
+          },
+          writeScope,
+        )
         toast.success('Group created')
       }
       setEditing(null)
@@ -74,10 +93,10 @@ const ModifiersPage = () => {
   }
 
   const onDeleteGroup = async () => {
-    if (!toDelete) return
+    if (!toDelete || !branchId) return
     setSaving(true)
     try {
-      await deleteModifierGroup(companyId, toDelete.id)
+      await deleteModifierGroup(companyId, branchId, toDelete.id, writeScope)
       toast.success('Group deleted')
       setToDelete(null)
     } catch (e) {
@@ -98,17 +117,23 @@ const ModifiersPage = () => {
   }
 
   const onSaveOption = async () => {
-    if (!optionFor) return
+    if (!optionFor || !branchId) return
     if (!optionFor.option.name.trim()) {
       toast.error('Option name required')
       return
     }
     setSaving(true)
     try {
-      await upsertModifierOption(companyId, optionFor.groupId, {
-        ...optionFor.option,
-        name: optionFor.option.name.trim(),
-      })
+      await upsertModifierOption(
+        companyId,
+        branchId,
+        optionFor.groupId,
+        {
+          ...optionFor.option,
+          name: optionFor.option.name.trim(),
+        },
+        writeScope,
+      )
       toast.success('Option saved')
       setOptionFor(null)
     } catch (e) {
@@ -119,8 +144,9 @@ const ModifiersPage = () => {
   }
 
   const onDeleteOption = async (groupId: string, optionId: string) => {
+    if (!branchId) return
     try {
-      await deleteModifierOption(companyId, groupId, optionId)
+      await deleteModifierOption(companyId, branchId, groupId, optionId, writeScope)
       toast.success('Option removed')
     } catch (e) {
       toast.error(e instanceof Error ? e.message : 'Delete failed')
@@ -131,13 +157,20 @@ const ModifiersPage = () => {
 
   return (
     <div className="p-6">
-      <div className="mb-6 flex items-center justify-between">
+      <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="text-2xl font-bold text-slate-900">Modifiers</h1>
           <p className="text-sm text-slate-500">
             Define modifier groups (e.g. Size, Add-ons) and their options.
           </p>
         </div>
+        {showScopeToggle && (
+          <BranchWriteScopeToggle
+            value={writeScope}
+            onChange={setWriteScope}
+            disabled={saving}
+          />
+        )}
         <button onClick={startCreateGroup} className="btn-primary">
           + New Group
         </button>

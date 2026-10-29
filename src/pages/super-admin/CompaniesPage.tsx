@@ -34,7 +34,7 @@ const CompaniesPage = () => {
   )
 
   const onView = (c: Company) => {
-    setActiveCompany(c.id, true)
+    setActiveCompany(c.id, true, null)
     navigate('/admin/pos')
   }
 

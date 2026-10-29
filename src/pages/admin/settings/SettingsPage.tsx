@@ -1,17 +1,23 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import toast from 'react-hot-toast'
 import { useAuthStore } from '@/stores/authStore'
 import { useCompanyContextStore } from '@/stores/companyContextStore'
 import { isDesktopApp, usePosSettingsStore } from '@/stores/posSettingsStore'
 import { useCompany } from '@/hooks/useCompany'
+import { useBranches } from '@/hooks/useBranches'
+import { useCompanyMenu } from '@/hooks/useCompanyMenu'
 import { useCompanyTaxSettings } from '@/hooks/useCompanyTaxSettings'
 import { useCompanyReceiptSettings } from '@/hooks/useCompanyReceiptSettings'
+import { useCompanyKitchenReceiptSettings } from '@/hooks/useCompanyKitchenReceiptSettings'
+import BranchWriteScopeToggle from '@/components/common/BranchWriteScopeToggle'
+import type { BranchWriteScope } from '@/types'
 import {
   CANADIAN_TAX_PRESETS,
   componentsFromPreset,
   saveTaxSettings,
 } from '@/services/taxSettings'
 import { saveReceiptSettings } from '@/services/receiptSettings'
+import { saveKitchenReceiptSettings } from '@/services/kitchenReceiptSettings'
 import type {
   DesktopDisplayInfo,
   DesktopPrinter,
@@ -19,6 +25,8 @@ import type {
   UpdateStatus,
 } from '@/types/desktop'
 import type {
+  CompanyKitchenReceiptSettings,
+  Order,
   ReceiptAlign,
   ReceiptBlock,
   ReceiptBlockType,
@@ -39,7 +47,10 @@ import {
 import ReceiptDocument, {
   SAMPLE_RECEIPT_ORDER,
 } from '@/components/receipt/ReceiptDocument'
+import KitchenReceiptDocument from '@/components/receipt/KitchenReceiptDocument'
 import { cn } from '@/utils/cn'
+
+type ItemKitchenOverride = 'follow' | 'include' | 'exclude'
 
 const ALIGN_OPTIONS: { value: ReceiptAlign; label: string }[] = [
   { value: 'left', label: 'Left' },
@@ -84,23 +95,52 @@ const SettingsPage = () => {
   const desktop = isDesktopApp()
   const user = useAuthStore((s) => s.user)
   const companyId = useCompanyContextStore((s) => s.activeCompanyId) || ''
+  const branchId = useCompanyContextStore((s) => s.activeBranchId) || ''
   const { company } = useCompany(companyId)
-  const { settings, loading: taxLoading } = useCompanyTaxSettings(companyId)
+  const { branches } = useBranches(companyId || undefined)
+  const activeBranch = branches.find((b) => b.id === branchId) ?? null
+  const receiptPreviewCompany =
+    company && activeBranch
+      ? {
+          ...company,
+          location: activeBranch.location || company.location,
+          phone: activeBranch.phone ?? company.phone,
+        }
+      : company
+  const { settings, loading: taxLoading } = useCompanyTaxSettings(
+    companyId,
+    branchId || undefined,
+  )
   const {
     settings: receiptRemote,
     loading: receiptLoading,
     error: receiptError,
-  } = useCompanyReceiptSettings(companyId)
+  } = useCompanyReceiptSettings(companyId, branchId || undefined)
+  const {
+    settings: kitchenRemote,
+    loading: kitchenLoading,
+    error: kitchenError,
+  } = useCompanyKitchenReceiptSettings(companyId, branchId || undefined)
+  const { categories, items: menuItems } = useCompanyMenu(
+    companyId || undefined,
+    branchId || undefined,
+  )
+  const [taxWriteScope, setTaxWriteScope] = useState<BranchWriteScope>('this')
+  const showTaxScopeToggle = user?.role === 'admin' || user?.role === 'super_admin'
 
   const canSettings = can(user, 'settings')
   const canReceipt = can(user, 'receipt')
+  /** Device printer / auto-print — available with receipt or full settings access. */
+  const canPrinter = canSettings || canReceipt
 
   const receiptPrinterName = usePosSettingsStore((s) => s.receiptPrinterName)
   const autoPrint = usePosSettingsStore((s) => s.autoPrint)
+  const autoPrintKitchen = usePosSettingsStore((s) => s.autoPrintKitchen)
   const customerDisplayEnabled = usePosSettingsStore((s) => s.customerDisplayEnabled)
   const customerDisplayId = usePosSettingsStore((s) => s.customerDisplayId)
   const setReceiptPrinterName = usePosSettingsStore((s) => s.setReceiptPrinterName)
   const setAutoPrint = usePosSettingsStore((s) => s.setAutoPrint)
+  const setAutoPrintKitchen = usePosSettingsStore((s) => s.setAutoPrintKitchen)
   const setCustomerDisplayEnabled = usePosSettingsStore((s) => s.setCustomerDisplayEnabled)
   const setCustomerDisplayId = usePosSettingsStore((s) => s.setCustomerDisplayId)
 
@@ -108,6 +148,7 @@ const SettingsPage = () => {
   const [loadingPrinters, setLoadingPrinters] = useState(desktop)
   const [selectedPrinter, setSelectedPrinter] = useState(receiptPrinterName ?? '')
   const [autoPrintLocal, setAutoPrintLocal] = useState(autoPrint)
+  const [autoPrintKitchenLocal, setAutoPrintKitchenLocal] = useState(autoPrintKitchen)
   const [testing, setTesting] = useState(false)
 
   const [displays, setDisplays] = useState<DesktopDisplayInfo[]>([])
@@ -128,6 +169,15 @@ const SettingsPage = () => {
   const [savingReceipt, setSavingReceipt] = useState(false)
   const [addBlockType, setAddBlockType] = useState<ReceiptBlockType>('text')
 
+  const [kitchenDraft, setKitchenDraft] = useState<CompanyKitchenReceiptSettings | null>(
+    null,
+  )
+  const [kitchenDirty, setKitchenDirty] = useState(false)
+  const [savingKitchen, setSavingKitchen] = useState(false)
+  const [expandedKitchenCats, setExpandedKitchenCats] = useState<Set<string>>(
+    () => new Set(),
+  )
+
   const [appVersion, setAppVersion] = useState('')
   const [updateInfo, setUpdateInfo] = useState<UpdateEventPayload | null>(null)
   const [checkingUpdate, setCheckingUpdate] = useState(false)
@@ -136,7 +186,8 @@ const SettingsPage = () => {
   useEffect(() => {
     setSelectedPrinter(receiptPrinterName ?? '')
     setAutoPrintLocal(autoPrint)
-  }, [receiptPrinterName, autoPrint])
+    setAutoPrintKitchenLocal(autoPrintKitchen)
+  }, [receiptPrinterName, autoPrint, autoPrintKitchen])
 
   useEffect(() => {
     setCfdEnabledLocal(customerDisplayEnabled)
@@ -193,6 +244,21 @@ const SettingsPage = () => {
   }, [receiptRemote, receiptDirty])
 
   useEffect(() => {
+    if (kitchenDirty) return
+    setKitchenDraft(kitchenRemote)
+  }, [kitchenRemote, kitchenDirty])
+
+  useEffect(() => {
+    if (!kitchenError || !canReceipt) return
+    toast.error(
+      kitchenError.message.includes('PERMISSION') ||
+        kitchenError.code === 'PERMISSION_DENIED'
+        ? 'Cannot load kitchen receipt settings — deploy database rules (npm run deploy:rules).'
+        : kitchenError.message,
+    )
+  }, [kitchenError, canReceipt])
+
+  useEffect(() => {
     if (!receiptError || !canReceipt) return
     toast.error(
       receiptError.message.includes('PERMISSION') ||
@@ -225,8 +291,115 @@ const SettingsPage = () => {
   const handleSavePrinter = () => {
     setReceiptPrinterName(selectedPrinter || null)
     setAutoPrint(autoPrintLocal)
+    setAutoPrintKitchen(autoPrintKitchenLocal)
     toast.success('Printer settings saved')
   }
+
+  const patchKitchenDraft = (
+    patch: Partial<
+      Pick<
+        CompanyKitchenReceiptSettings,
+        'excludedCategoryIds' | 'excludedItemIds' | 'includedItemIds'
+      >
+    >,
+  ) => {
+    setKitchenDraft((prev) => {
+      if (!prev) return prev
+      return { ...prev, ...patch }
+    })
+    setKitchenDirty(true)
+  }
+
+  const toggleKitchenCategory = (categoryId: string, excluded: boolean) => {
+    if (!kitchenDraft) return
+    const set = new Set(kitchenDraft.excludedCategoryIds)
+    if (excluded) set.add(categoryId)
+    else set.delete(categoryId)
+    patchKitchenDraft({ excludedCategoryIds: [...set] })
+  }
+
+  const getItemKitchenOverride = (itemId: string): ItemKitchenOverride => {
+    if (!kitchenDraft) return 'follow'
+    if (kitchenDraft.includedItemIds.includes(itemId)) return 'include'
+    if (kitchenDraft.excludedItemIds.includes(itemId)) return 'exclude'
+    return 'follow'
+  }
+
+  const setItemKitchenOverride = (itemId: string, state: ItemKitchenOverride) => {
+    if (!kitchenDraft) return
+    const included = new Set(kitchenDraft.includedItemIds)
+    const excluded = new Set(kitchenDraft.excludedItemIds)
+    included.delete(itemId)
+    excluded.delete(itemId)
+    if (state === 'include') included.add(itemId)
+    if (state === 'exclude') excluded.add(itemId)
+    patchKitchenDraft({
+      includedItemIds: [...included],
+      excludedItemIds: [...excluded],
+    })
+  }
+
+  const toggleKitchenCatExpanded = (categoryId: string) => {
+    setExpandedKitchenCats((prev) => {
+      const next = new Set(prev)
+      if (next.has(categoryId)) next.delete(categoryId)
+      else next.add(categoryId)
+      return next
+    })
+  }
+
+  const handleSaveKitchen = async () => {
+    if (!user || !companyId || !branchId || !kitchenDraft) return
+    setSavingKitchen(true)
+    try {
+      await saveKitchenReceiptSettings(
+        companyId,
+        branchId,
+        {
+          excludedCategoryIds: kitchenDraft.excludedCategoryIds,
+          excludedItemIds: kitchenDraft.excludedItemIds,
+          includedItemIds: kitchenDraft.includedItemIds,
+        },
+        user.uid,
+      )
+      setKitchenDirty(false)
+      toast.success('Kitchen receipt settings saved')
+    } catch (err) {
+      toast.error(
+        err instanceof Error ? err.message : 'Failed to save kitchen receipt settings',
+      )
+    } finally {
+      setSavingKitchen(false)
+    }
+  }
+
+  const kitchenPreviewOrder = useMemo((): Order => {
+    const sampleItems = menuItems.slice(0, 8).map((item, index) => ({
+      lineId: `kitchen-preview-${item.id}`,
+      itemId: item.id,
+      itemName: item.name,
+      categoryId: item.categoryId,
+      basePrice: item.basePrice,
+      quantity: index === 0 ? 2 : 1,
+      modifiers: [],
+      unitPrice: item.basePrice,
+      lineTotal: item.basePrice * (index === 0 ? 2 : 1),
+      ...(index === 1 ? { note: 'No onions' } : {}),
+    }))
+    return {
+      ...SAMPLE_RECEIPT_ORDER,
+      companyId: companyId || 'preview',
+      branchId: branchId || 'preview-branch',
+      tableNumber: '12',
+      items:
+        sampleItems.length > 0
+          ? sampleItems
+          : SAMPLE_RECEIPT_ORDER.items.map((it) => ({
+              ...it,
+              note: it.lineId === '2' ? 'Extra sauce' : it.note,
+            })),
+    }
+  }, [menuItems, companyId, branchId])
 
   const handleTestPrint = async () => {
     if (!selectedPrinter || !window.posDesktop) {
@@ -401,8 +574,8 @@ const SettingsPage = () => {
   }
 
   const handleSaveTax = async () => {
-    if (!companyId || !user) {
-      toast.error('Missing company context')
+    if (!companyId || !branchId || !user) {
+      toast.error('Missing company or branch context')
       return
     }
     for (const c of taxComponents) {
@@ -424,7 +597,13 @@ const SettingsPage = () => {
     }
     setSavingTax(true)
     try {
-      await saveTaxSettings(companyId, taxComponents, user.uid)
+      await saveTaxSettings(
+        companyId,
+        branchId,
+        taxComponents,
+        user.uid,
+        taxWriteScope,
+      )
       setTaxDirty(false)
       toast.success('Tax settings saved')
     } catch (err) {
@@ -472,13 +651,13 @@ const SettingsPage = () => {
   }
 
   const handleSaveReceipt = async () => {
-    if (!companyId || !user) {
-      toast.error('Missing company context')
+    if (!companyId || !branchId || !user) {
+      toast.error('Missing company or branch context')
       return
     }
     setSavingReceipt(true)
     try {
-      await saveReceiptSettings(companyId, receiptBlocks, user.uid)
+      await saveReceiptSettings(companyId, branchId, receiptBlocks, user.uid)
       setReceiptDirty(false)
       toast.success('Receipt template saved')
     } catch (err) {
@@ -652,14 +831,21 @@ const SettingsPage = () => {
                 </ul>
               )}
 
-              <div className="flex flex-wrap gap-3">
+              <div className="flex flex-wrap items-center gap-3">
+                {showTaxScopeToggle && (
+                  <BranchWriteScopeToggle
+                    value={taxWriteScope}
+                    onChange={setTaxWriteScope}
+                    disabled={savingTax}
+                  />
+                )}
                 <button type="button" className="btn-secondary" onClick={handleAddComponent}>
                   Add component
                 </button>
                 <button
                   type="button"
                   className="btn-primary"
-                  disabled={savingTax || !companyId}
+                  disabled={savingTax || !companyId || !branchId}
                   onClick={() => void handleSaveTax()}
                 >
                   {savingTax ? 'Saving…' : 'Save tax settings'}
@@ -843,7 +1029,7 @@ const SettingsPage = () => {
                         ...SAMPLE_RECEIPT_ORDER,
                         companyId: companyId || 'preview',
                       }}
-                      company={company}
+                      company={receiptPreviewCompany}
                       blocks={receiptBlocks}
                       className="shadow-none"
                     />
@@ -853,10 +1039,169 @@ const SettingsPage = () => {
                 <button
                   type="button"
                   className="btn-primary"
-                  disabled={savingReceipt || !companyId}
+                  disabled={savingReceipt || !companyId || !branchId}
                   onClick={() => void handleSaveReceipt()}
                 >
                   {savingReceipt ? 'Saving…' : 'Save receipt template'}
+                </button>
+              </div>
+            )}
+          </section>
+        </div>
+      )}
+
+      {canReceipt && (
+        <div className="card space-y-6 p-6">
+          <section>
+            <h2 className="text-sm font-semibold text-slate-900">Kitchen receipt</h2>
+            <p className="mt-1 text-sm text-slate-500">
+              Choose which categories appear on kitchen tickets. Override individual
+              items to always include or always exclude them.
+            </p>
+
+            {!companyId || !branchId ? (
+              <p className="mt-3 text-sm text-amber-700">
+                Select a company and branch to edit kitchen receipt settings.
+              </p>
+            ) : kitchenLoading && !kitchenDirty ? (
+              <p className="mt-3 text-sm text-slate-400">Loading kitchen settings…</p>
+            ) : !kitchenDraft ? (
+              <p className="mt-3 text-sm text-slate-400">Loading kitchen settings…</p>
+            ) : (
+              <div className="mt-4 space-y-4">
+                {categories.length === 0 ? (
+                  <p className="text-sm text-slate-500">
+                    No categories yet. Add menu categories first.
+                  </p>
+                ) : (
+                  <ul className="space-y-2">
+                    {categories
+                      .slice()
+                      .sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0))
+                      .map((cat) => {
+                        const excluded = kitchenDraft.excludedCategoryIds.includes(
+                          cat.id,
+                        )
+                        const catItems = menuItems
+                          .filter((i) => i.categoryId === cat.id)
+                          .sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0))
+                        const expanded = expandedKitchenCats.has(cat.id)
+                        return (
+                          <li
+                            key={cat.id}
+                            className="rounded-lg border border-slate-200 bg-slate-50/80"
+                          >
+                            <div className="flex flex-wrap items-center gap-3 p-3">
+                              <button
+                                type="button"
+                                className="text-left text-sm font-medium text-slate-900"
+                                onClick={() => toggleKitchenCatExpanded(cat.id)}
+                              >
+                                <span className="mr-2 text-slate-400">
+                                  {expanded ? '▾' : '▸'}
+                                </span>
+                                {cat.name}
+                                <span className="ml-2 text-xs font-normal text-slate-500">
+                                  ({catItems.length} items)
+                                </span>
+                              </button>
+                              <div className="ml-auto flex items-center gap-2">
+                                <span className="text-xs text-slate-500">
+                                  {excluded ? 'Excluded' : 'Included'}
+                                </span>
+                                <button
+                                  type="button"
+                                  className={cn(
+                                    'rounded-md px-2.5 py-1 text-xs font-medium',
+                                    excluded
+                                      ? 'bg-slate-200 text-slate-700'
+                                      : 'bg-brand-600 text-white',
+                                  )}
+                                  onClick={() =>
+                                    toggleKitchenCategory(cat.id, !excluded)
+                                  }
+                                >
+                                  {excluded ? 'Include category' : 'Exclude category'}
+                                </button>
+                              </div>
+                            </div>
+                            {expanded && (
+                              <div className="border-t border-slate-200 px-3 py-2">
+                                {catItems.length === 0 ? (
+                                  <p className="py-1 text-xs text-slate-400">
+                                    No items in this category.
+                                  </p>
+                                ) : (
+                                  <ul className="space-y-2 py-1">
+                                    {catItems.map((item) => {
+                                      const override = getItemKitchenOverride(item.id)
+                                      return (
+                                        <li
+                                          key={item.id}
+                                          className="flex flex-wrap items-center gap-2"
+                                        >
+                                          <span className="min-w-0 flex-1 text-sm text-slate-800">
+                                            {item.name}
+                                          </span>
+                                          <div className="flex flex-wrap gap-1">
+                                            {(
+                                              [
+                                                ['follow', 'Follow'],
+                                                ['include', 'Always include'],
+                                                ['exclude', 'Always exclude'],
+                                              ] as const
+                                            ).map(([value, label]) => (
+                                              <button
+                                                key={value}
+                                                type="button"
+                                                className={cn(
+                                                  'rounded-full px-2.5 py-0.5 text-xs font-medium',
+                                                  override === value
+                                                    ? 'bg-brand-600 text-white'
+                                                    : 'bg-white text-slate-600 ring-1 ring-slate-200',
+                                                )}
+                                                onClick={() =>
+                                                  setItemKitchenOverride(item.id, value)
+                                                }
+                                              >
+                                                {label}
+                                              </button>
+                                            ))}
+                                          </div>
+                                        </li>
+                                      )
+                                    })}
+                                  </ul>
+                                )}
+                              </div>
+                            )}
+                          </li>
+                        )
+                      })}
+                  </ul>
+                )}
+
+                <div className="border-t border-slate-100 pt-4">
+                  <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                    Preview
+                  </h3>
+                  <div className="mt-3 overflow-hidden rounded-lg border border-slate-200 bg-slate-100 py-4">
+                    <KitchenReceiptDocument
+                      id="kitchen-receipt-settings-preview"
+                      order={kitchenPreviewOrder}
+                      settings={kitchenDraft}
+                      className="shadow-none"
+                    />
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  className="btn-primary"
+                  disabled={savingKitchen || !kitchenDirty}
+                  onClick={() => void handleSaveKitchen()}
+                >
+                  {savingKitchen ? 'Saving…' : 'Save kitchen receipt settings'}
                 </button>
               </div>
             )}
@@ -1039,7 +1384,7 @@ const SettingsPage = () => {
         </div>
       )}
 
-      {canSettings && (
+      {canPrinter && (
       <div className="card space-y-6 p-6">
         <section>
           <h2 className="text-sm font-semibold text-slate-900">Receipt printer</h2>
@@ -1111,6 +1456,24 @@ const SettingsPage = () => {
               </span>
               <span className="mt-0.5 block text-xs text-slate-500">
                 Applies after checkout and when opening a receipt from order history.
+              </span>
+            </span>
+          </label>
+          <label className="mt-3 flex cursor-pointer items-start gap-3">
+            <input
+              type="checkbox"
+              className="mt-1 h-4 w-4 rounded border-slate-300 text-brand-600 focus:ring-brand-500"
+              checked={autoPrintKitchenLocal}
+              onChange={(e) => setAutoPrintKitchenLocal(e.target.checked)}
+              disabled={!autoPrintLocal}
+            />
+            <span>
+              <span className="block text-sm font-medium text-slate-800">
+                Also print kitchen ticket
+              </span>
+              <span className="mt-0.5 block text-xs text-slate-500">
+                Prints on the same receipt printer right after the customer receipt.
+                Skipped when the order has no kitchen items.
               </span>
             </span>
           </label>

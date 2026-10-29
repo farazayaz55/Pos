@@ -14,7 +14,25 @@ import {
 interface AddLineInput {
   itemId: string
   itemName: string
+  categoryId?: string
+  /** Absolute line base (variant.price or item.basePrice). */
   basePrice: number
+  variantId?: string
+  variantName?: string
+  imageUrl?: string
+  quantity: number
+  modifiers: CartModifierSelection[]
+  note?: string
+}
+
+/** Parent item + selected modifier options; options become independent lines. */
+export interface AddItemWithSplitModifiersInput {
+  itemId: string
+  itemName: string
+  categoryId?: string
+  basePrice: number
+  variantId?: string
+  variantName?: string
   imageUrl?: string
   quantity: number
   modifiers: CartModifierSelection[]
@@ -23,6 +41,7 @@ interface AddLineInput {
 
 interface CartState {
   companyId: string | null
+  branchId: string | null
   lines: CartLine[]
   tableNumber: string
   discountType: DiscountType
@@ -31,7 +50,10 @@ interface CartState {
   editingOrderNumber: number | null
 
   setCompanyId: (companyId: string | null) => void
+  setBranchId: (branchId: string | null) => void
   addLine: (input: AddLineInput) => void
+  /** Parent at base price, then one independent line per selected modifier option. */
+  addItemWithSplitModifiers: (input: AddItemWithSplitModifiersInput) => void
   updateLineQuantity: (lineId: string, qty: number) => void
   removeLine: (lineId: string) => void
   setTableNumber: (n: string) => void
@@ -69,6 +91,9 @@ const buildLine = (input: AddLineInput): CartLine => {
     modifiers: input.modifiers,
     unitPrice,
     lineTotal,
+    ...(input.categoryId ? { categoryId: input.categoryId } : {}),
+    ...(input.variantId ? { variantId: input.variantId } : {}),
+    ...(input.variantName ? { variantName: input.variantName } : {}),
     ...(input.imageUrl ? { imageUrl: input.imageUrl } : {}),
     ...(input.note ? { note: input.note } : {}),
   }
@@ -78,6 +103,7 @@ export const useCartStore = create<CartState>()(
   persist(
     (set, get) => ({
       companyId: null,
+      branchId: null,
       ...emptyCartFields,
 
       setCompanyId: (companyId) => {
@@ -85,6 +111,17 @@ export const useCartStore = create<CartState>()(
         if (current !== companyId) {
           set({
             companyId,
+            branchId: null,
+            ...emptyCartFields,
+          })
+        }
+      },
+
+      setBranchId: (branchId) => {
+        const current = get().branchId
+        if (current !== branchId) {
+          set({
+            branchId,
             ...emptyCartFields,
           })
         }
@@ -93,6 +130,32 @@ export const useCartStore = create<CartState>()(
       addLine: (input) => {
         const newLine = buildLine(input)
         set((s) => ({ lines: [...s.lines, newLine] }))
+      },
+
+      addItemWithSplitModifiers: (input) => {
+        const parent = buildLine({
+          itemId: input.itemId,
+          itemName: input.itemName,
+          basePrice: input.basePrice,
+          quantity: input.quantity,
+          modifiers: [],
+          ...(input.categoryId ? { categoryId: input.categoryId } : {}),
+          ...(input.variantId ? { variantId: input.variantId } : {}),
+          ...(input.variantName ? { variantName: input.variantName } : {}),
+          ...(input.imageUrl ? { imageUrl: input.imageUrl } : {}),
+          ...(input.note ? { note: input.note } : {}),
+        })
+        const addonLines = input.modifiers.map((m) =>
+          buildLine({
+            itemId: m.optionId,
+            itemName: m.optionName,
+            basePrice: m.priceAdjustment,
+            quantity: input.quantity,
+            modifiers: [],
+            ...(input.categoryId ? { categoryId: input.categoryId } : {}),
+          }),
+        )
+        set((s) => ({ lines: [...s.lines, parent, ...addonLines] }))
       },
 
       updateLineQuantity: (lineId, qty) => {
@@ -127,10 +190,14 @@ export const useCartStore = create<CartState>()(
           modifiers: it.modifiers ?? [],
           unitPrice: it.unitPrice,
           lineTotal: it.lineTotal,
+          ...(it.categoryId ? { categoryId: it.categoryId } : {}),
+          ...(it.variantId ? { variantId: it.variantId } : {}),
+          ...(it.variantName ? { variantName: it.variantName } : {}),
           ...(it.note ? { note: it.note } : {}),
         }))
         set({
           companyId: order.companyId,
+          branchId: order.branchId,
           lines,
           tableNumber: order.tableNumber ?? '',
           discountType: order.discount.type,
@@ -171,6 +238,7 @@ export const useCartStore = create<CartState>()(
       name: 'pos.cart',
       partialize: (state) => ({
         companyId: state.companyId,
+        branchId: state.branchId,
         lines: state.lines,
         tableNumber: state.tableNumber,
         discountType: state.discountType,

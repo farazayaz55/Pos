@@ -1,6 +1,6 @@
 import { httpsCallable } from 'firebase/functions'
 import { functions } from '@/lib/firebase'
-import type { StaffPermissions } from '@/types'
+import type { DayState, StaffPermissions, ZReport } from '@/types'
 
 export interface CreateCompanyAdminInput {
   companyName: string
@@ -15,6 +15,7 @@ export interface CreateCompanyAdminInput {
 export interface CreateCompanyAdminResult {
   companyId: string
   adminUid: string
+  branchId: string
 }
 
 export const createCompanyAdmin = httpsCallable<
@@ -36,6 +37,11 @@ export const setSuperAdminClaim = httpsCallable<Record<string, never>, { ok: tru
   'setSuperAdminClaim',
 )
 
+export const syncMyClaims = httpsCallable<Record<string, never>, { ok: true }>(
+  functions,
+  'syncMyClaims',
+)
+
 export interface UpdateCompanyAdminInput {
   companyId: string
   adminName?: string
@@ -49,6 +55,7 @@ export const updateCompanyAdmin = httpsCallable<
 
 export interface RefundOrderInput {
   companyId: string
+  branchId: string
   orderId: string
 }
 
@@ -65,6 +72,7 @@ export const refundOrder = httpsCallable<RefundOrderInput, RefundOrderResult>(
 
 export interface CreateTeamMemberInput {
   companyId: string
+  branchId: string
   name: string
   email: string
   password: string
@@ -87,7 +95,35 @@ export interface UpdateTeamMemberInput {
   password?: string
   permissions?: StaffPermissions
   active?: boolean
+  branchId?: string
 }
+
+export interface CreateBranchInput {
+  companyId: string
+  sourceBranchId: string
+  name: string
+  location: string
+  phone?: string
+}
+
+export interface CreateBranchResult {
+  branchId: string
+}
+
+export const createBranch = httpsCallable<CreateBranchInput, CreateBranchResult>(
+  functions,
+  'createBranch',
+)
+
+export interface DeleteBranchInput {
+  companyId: string
+  branchId: string
+}
+
+export const deleteBranchCallable = httpsCallable<DeleteBranchInput, { ok: true }>(
+  functions,
+  'deleteBranch',
+)
 
 export const updateTeamMember = httpsCallable<UpdateTeamMemberInput, { ok: true }>(
   functions,
@@ -103,3 +139,19 @@ export const deleteTeamMember = httpsCallable<DeleteTeamMemberInput, { ok: true 
   functions,
   'deleteTeamMember',
 )
+
+export interface CloseBusinessDayInput {
+  companyId: string
+  branchId: string
+  actualCash: number
+}
+
+export interface CloseBusinessDayResult {
+  report: ZReport
+  dayState: DayState
+}
+
+export const closeBusinessDay = httpsCallable<
+  CloseBusinessDayInput,
+  CloseBusinessDayResult
+>(functions, 'closeBusinessDay')

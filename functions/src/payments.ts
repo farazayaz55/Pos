@@ -44,7 +44,7 @@ import {
 import { logger } from 'firebase-functions/v2'
 import * as admin from 'firebase-admin'
 import Stripe from 'stripe'
-import { businessDateUtc } from './businessDate'
+import { mintPeriodOrderNumber } from './dayClose'
 
 const db = admin.database()
 
@@ -128,6 +128,13 @@ interface ModifierGroup {
   options?: Record<string, ModifierOption>
 }
 
+interface ItemVariantDoc {
+  id?: string
+  name: string
+  price: number
+  sortOrder?: number
+}
+
 interface MenuItemDoc {
   id?: string
   companyId?: string
@@ -135,6 +142,7 @@ interface MenuItemDoc {
   name: string
   basePrice: number
   available?: boolean
+  variants?: Record<string, ItemVariantDoc>
   modifierGroupIds?: string[]
 }
 
@@ -146,6 +154,7 @@ interface KioskModifierInput {
 interface KioskLineInput {
   itemId: string
   quantity: number
+  variantId?: string
   modifiers?: KioskModifierInput[]
   note?: string
 }
@@ -154,7 +163,10 @@ interface PricedLine {
   lineId: string
   itemId: string
   itemName: string
+  categoryId?: string
   basePrice: number
+  variantId?: string
+  variantName?: string
   quantity: number
   modifiers: {
     groupId: string
@@ -244,9 +256,10 @@ const calcTax = (
 
 const loadCompanyTaxComponents = async (
   companyId: string,
+  branchId: string,
   legacyTaxRate?: number,
 ): Promise<TaxComponent[]> => {
-  const snap = await db.ref(`taxSettings/${companyId}`).get()
+  const snap = await db.ref(`taxSettings/${companyId}/${branchId}`).get()
   const settings = snap.val() as { components?: Record<string, TaxComponent> } | null
   return resolveTaxComponents(settings?.components, legacyTaxRate)
 }
@@ -261,6 +274,7 @@ const sanitizeQty = (q: unknown): number => {
 
 const priceLines = async (
   companyId: string,
+  branchId: string,
   rawLines: KioskLineInput[],
 ): Promise<{
   lines: PricedLine[]
@@ -274,8 +288,8 @@ const priceLines = async (
   }
 
   const [itemsSnap, groupsSnap] = await Promise.all([
-    db.ref(`menu/${companyId}/items`).get(),
-    db.ref(`menu/${companyId}/modifierGroups`).get(),
+    db.ref(`menu/${companyId}/${branchId}/items`).get(),
+    db.ref(`menu/${companyId}/${branchId}/modifierGroups`).get(),
   ])
   const itemsMap = (itemsSnap.val() ?? {}) as Record<string, MenuItemDoc>
   const groupsMap = (groupsSnap.val() ?? {}) as Record<string, ModifierGroup>
@@ -297,6 +311,37 @@ const priceLines = async (
     }
 
     const qty = sanitizeQty(raw.quantity)
+
+    const variantsMap = item.variants ?? {}
+    const variantIds = Object.keys(variantsMap)
+    const hasVariants = variantIds.length > 0
+    let basePrice = Number(item.basePrice) || 0
+    let variantId: string | undefined
+    let variantName: string | undefined
+
+    if (hasVariants) {
+      if (!raw.variantId || typeof raw.variantId !== 'string') {
+        throw new HttpsError(
+          'failed-precondition',
+          `Item ${item.name} requires a size/variant.`,
+        )
+      }
+      const variant = variantsMap[raw.variantId]
+      if (!variant) {
+        throw new HttpsError(
+          'failed-precondition',
+          `Variant ${raw.variantId} no longer exists on ${item.name}.`,
+        )
+      }
+      variantId = raw.variantId
+      variantName = variant.name
+      basePrice = Number(variant.price) || 0
+    } else if (raw.variantId) {
+      throw new HttpsError(
+        'failed-precondition',
+        `Item ${item.name} has no variants.`,
+      )
+    }
 
     const allowedGroupIds = new Set(item.modifierGroupIds ?? [])
     const groupSelectionCounts: Record<string, number> = {}
@@ -353,7 +398,6 @@ const priceLines = async (
       }
     }
 
-    const basePrice = Number(item.basePrice) || 0
     const unit = round2(
       basePrice + pricedMods.reduce((s, m) => s + m.priceAdjustment, 0),
     )
@@ -365,9 +409,12 @@ const priceLines = async (
       lineId,
       itemId: raw.itemId,
       itemName: item.name,
+      ...(item.categoryId ? { categoryId: String(item.categoryId) } : {}),
       basePrice,
       quantity: qty,
       modifiers: pricedMods,
+      ...(variantId ? { variantId } : {}),
+      ...(variantName ? { variantName } : {}),
       ...(raw.note ? { note: String(raw.note).slice(0, 200) } : {}),
       unitPrice: unit,
       lineTotal,
@@ -457,6 +504,7 @@ export const createKioskPaymentIntent = onCall<
 
 interface CreateOrderInput {
   companyId: string
+  branchId: string
   paymentIntentId?: string
   paymentMethod: 'card_reader' | 'tap_to_pay' | 'cash'
   lines: KioskLineInput[]
@@ -479,6 +527,7 @@ export const createKioskOrder = onCall<
   requireAuth(req)
   const {
     companyId,
+    branchId,
     paymentIntentId,
     paymentMethod,
     lines,
@@ -489,6 +538,9 @@ export const createKioskOrder = onCall<
 
   const isCash = paymentMethod === 'cash'
 
+  if (!branchId || typeof branchId !== 'string') {
+    throw new HttpsError('invalid-argument', 'branchId is required.')
+  }
   if (!isCash && (!paymentIntentId || typeof paymentIntentId !== 'string')) {
     throw new HttpsError('invalid-argument', 'paymentIntentId required.')
   }
@@ -510,11 +562,15 @@ export const createKioskOrder = onCall<
   // descriptive message to the client.
   try {
     const company = await assertCompanyActive(companyId)
+    const branchSnap = await db.ref(`companies/${companyId}/branches/${branchId}`).get()
+    if (!branchSnap.exists()) {
+      throw new HttpsError('not-found', 'Branch not found.')
+    }
     const tip = round2(Math.max(0, Number(tipAmount) || 0))
 
     const dedupeKey = isCash ? idempotencyKey : paymentIntentId
     const existingSnap = await db
-      .ref(`orders/${companyId}`)
+      .ref(`orders/${companyId}/${branchId}`)
       .orderByChild(isCash ? 'kioskIdempotencyKey' : 'stripePaymentIntentId')
       .equalTo(dedupeKey as string)
       .limitToFirst(1)
@@ -530,8 +586,12 @@ export const createKioskOrder = onCall<
       }
     }
 
-    const { lines: pricedLines, subtotal } = await priceLines(companyId, lines)
-    const taxComponents = await loadCompanyTaxComponents(companyId, company.taxRate)
+    const { lines: pricedLines, subtotal } = await priceLines(companyId, branchId, lines)
+    const taxComponents = await loadCompanyTaxComponents(
+      companyId,
+      branchId,
+      company.taxRate,
+    )
     const { tax, taxLines } = calcTax(subtotal, taxComponents)
     const total = round2(subtotal + tax + tip)
     const totalInCents = Math.round(total * 100)
@@ -560,15 +620,12 @@ export const createKioskOrder = onCall<
       }
     }
 
-    const orderDate = businessDateUtc()
-    const counterRef = db.ref(`counters/${companyId}/dailyOrderSeq/${orderDate}`)
-    const txn = await counterRef.transaction((current) => (current ?? 0) + 1)
-    if (!txn.committed) {
-      throw new HttpsError('aborted', 'Failed to mint order number.')
-    }
-    const orderNumber = Number(txn.snapshot.val()) || 1
+    const { orderNumber, orderDate, reportPeriodId } = await mintPeriodOrderNumber(
+      companyId,
+      branchId,
+    )
 
-    const node = db.ref(`orders/${companyId}`).push()
+    const node = db.ref(`orders/${companyId}/${branchId}`).push()
     const orderId = node.key as string
     const now = Date.now()
 
@@ -581,13 +638,17 @@ export const createKioskOrder = onCall<
       modifiers: l.modifiers,
       unitPrice: l.unitPrice,
       lineTotal: l.lineTotal,
+      ...(l.variantId ? { variantId: l.variantId } : {}),
+      ...(l.variantName ? { variantName: l.variantName } : {}),
       ...(l.note ? { note: l.note } : {}),
     }))
 
     const order: OrderRecord = {
       orderNumber,
       orderDate,
+      reportPeriodId,
       companyId,
+      branchId,
       items: itemsSnapshot,
       subtotal,
       discount: { type: 'none', value: 0, amount: 0 },
@@ -634,6 +695,7 @@ export const createKioskOrder = onCall<
 
 interface GetKioskOrderInput {
   companyId: string
+  branchId: string
   orderId: string
 }
 
@@ -654,14 +716,17 @@ interface GetKioskOrderResult {
 export const getKioskOrder = onCall<GetKioskOrderInput, Promise<GetKioskOrderResult>>(
   async (req) => {
     requireAuth(req)
-    const { companyId, orderId } = req.data || ({} as GetKioskOrderInput)
-    if (!companyId || !orderId) {
-      throw new HttpsError('invalid-argument', 'companyId and orderId are required.')
+    const { companyId, branchId, orderId } = req.data || ({} as GetKioskOrderInput)
+    if (!companyId || !branchId || !orderId) {
+      throw new HttpsError(
+        'invalid-argument',
+        'companyId, branchId and orderId are required.',
+      )
     }
 
     await assertCompanyActive(companyId)
 
-    const snap = await db.ref(`orders/${companyId}/${orderId}`).get()
+    const snap = await db.ref(`orders/${companyId}/${branchId}/${orderId}`).get()
     const order = snap.val() as OrderRecord | null
     if (!order) {
       throw new HttpsError('not-found', 'Order not found.')
@@ -685,6 +750,7 @@ export const getKioskOrder = onCall<GetKioskOrderInput, Promise<GetKioskOrderRes
 
 interface RefundOrderInput {
   companyId: string
+  branchId: string
   orderId: string
 }
 
@@ -696,9 +762,12 @@ interface RefundOrderResult {
 
 export const refundOrder = onCall<RefundOrderInput, Promise<RefundOrderResult>>(
   async (req) => {
-    const { companyId, orderId } = req.data || ({} as RefundOrderInput)
+    const { companyId, branchId, orderId } = req.data || ({} as RefundOrderInput)
     if (!companyId || typeof companyId !== 'string') {
       throw new HttpsError('invalid-argument', 'companyId is required.')
+    }
+    if (!branchId || typeof branchId !== 'string') {
+      throw new HttpsError('invalid-argument', 'branchId is required.')
     }
     if (!orderId || typeof orderId !== 'string') {
       throw new HttpsError('invalid-argument', 'orderId is required.')
@@ -707,7 +776,7 @@ export const refundOrder = onCall<RefundOrderInput, Promise<RefundOrderResult>>(
     const uid = requireCompanyAdmin(req, companyId)
     await assertCompanyActive(companyId)
 
-    const orderRef = db.ref(`orders/${companyId}/${orderId}`)
+    const orderRef = db.ref(`orders/${companyId}/${branchId}/${orderId}`)
     const snap = await orderRef.get()
     const order = snap.val() as OrderRecord | null
     if (!order) {
@@ -788,7 +857,9 @@ interface OrderRecord {
   orderNumber: number
   /** UTC calendar day (YYYY-MM-DD) the orderNumber was minted for. */
   orderDate?: string
+  reportPeriodId?: string
   companyId: string
+  branchId: string
   items: unknown[]
   subtotal: number
   discount: { type: 'none' | 'flat' | 'percent'; value: number; amount: number }

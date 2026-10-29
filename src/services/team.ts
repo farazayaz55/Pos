@@ -1,6 +1,7 @@
 import { ref, onValue } from 'firebase/database'
 import { db } from '@/lib/firebase'
 import type { TeamMember } from '@/types'
+import { normalizePermissions } from '@/utils/permissions'
 
 export const companyTeamRef = (companyId: string) =>
   ref(db, `companies/${companyId}/team`)
@@ -19,6 +20,8 @@ export const subscribeCompanyTeam = (
       uid,
       ...data,
       active: data.active !== false,
+      permissions:
+        data.role === 'staff' ? normalizePermissions(data.permissions) : data.permissions,
     }))
     list.sort((a, b) => {
       if (a.role === 'admin' && b.role !== 'admin') return -1

@@ -51,6 +51,7 @@ export interface CustomerDisplayState {
   lines: {
     lineId: string
     itemName: string
+    variantName?: string
     quantity: number
     lineTotal: number
     modifiers: { optionName: string; priceAdjustment: number }[]
@@ -70,7 +71,7 @@ export interface PosDesktopApi {
   getPrinters: () => Promise<DesktopPrinter[]>
   print: (options?: PrintOptions) => Promise<{ success: boolean; error?: string }>
   testPrint: (options?: PrintOptions) => Promise<{ success: boolean; error?: string }>
-  openDisplay: (companyId: string) => Promise<void>
+  openDisplay: (companyId: string, branchId: string) => Promise<void>
   getDisplays: () => Promise<DesktopDisplayInfo[]>
   openCustomerDisplay: (options?: { displayId?: number | null }) => Promise<void>
   closeCustomerDisplay: () => Promise<void>

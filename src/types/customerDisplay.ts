@@ -5,6 +5,7 @@ export type CustomerDisplayPhase = 'idle' | 'ordering' | 'thanks'
 export interface CustomerDisplayLine {
   lineId: string
   itemName: string
+  variantName?: string
   quantity: number
   lineTotal: number
   modifiers: { optionName: string; priceAdjustment: number }[]
@@ -47,5 +48,6 @@ export const cartLinesToDisplayLines = (lines: CartLine[]): CustomerDisplayLine[
       optionName: m.optionName,
       priceAdjustment: m.priceAdjustment,
     })),
+    ...(l.variantName ? { variantName: l.variantName } : {}),
     ...(l.note ? { note: l.note } : {}),
   }))

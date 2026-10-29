@@ -44,7 +44,8 @@ const isPendingSync = (o: Order) =>
 
 const OrderHistoryPage = () => {
   const companyId = useCompanyContextStore((s) => s.activeCompanyId) || ''
-  const { orders, loading } = useOrders(companyId)
+  const branchId = useCompanyContextStore((s) => s.activeBranchId) || ''
+  const { orders, loading } = useOrders(companyId, branchId || undefined)
   const { isOnline } = useOnlineStatus()
   const navigate = useNavigate()
   const loadFromOrder = useCartStore((s) => s.loadFromOrder)
@@ -95,7 +96,7 @@ const OrderHistoryPage = () => {
     if (!companyId) return
     setUpdating(true)
     try {
-      await completeKioskCashOrder(companyId, order.id)
+      await completeKioskCashOrder(companyId, order.branchId || branchId, order.id)
       toast.success(`Order #${formatOrderNumber(order.orderNumber)} completed`)
       setSelected(null)
     } catch (e) {
@@ -120,6 +121,7 @@ const OrderHistoryPage = () => {
     try {
       const result = await refundOrder({
         companyId,
+        branchId: refundConfirm.branchId || branchId,
         orderId: refundConfirm.id,
       })
       if (result.data.alreadyRefunded) {
@@ -182,7 +184,7 @@ const OrderHistoryPage = () => {
     }
     setSyncing(true)
     try {
-      await syncPendingOrdersWithToast(companyId)
+      await syncPendingOrdersWithToast(companyId, branchId)
     } finally {
       setSyncing(false)
     }
@@ -484,6 +486,7 @@ const OrderDetailDrawer = ({
                   <div className="flex justify-between">
                     <span className="font-medium">
                       {it.quantity} x {it.itemName}
+                      {it.variantName ? ` (${it.variantName})` : ''}
                     </span>
                     <span className="font-bold">{formatMoney(it.lineTotal)}</span>
                   </div>

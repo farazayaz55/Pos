@@ -30,7 +30,11 @@ const LoginPage = () => {
   useEffect(() => {
     if (user) {
       if ((user.role === 'admin' || user.role === 'staff') && user.companyId) {
-        setActiveCompany(user.companyId, false)
+        setActiveCompany(
+          user.companyId,
+          false,
+          user.role === 'staff' ? (user.branchId ?? null) : undefined,
+        )
       }
     }
   }, [user, setActiveCompany])

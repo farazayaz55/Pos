@@ -18,6 +18,22 @@ export type ReceiptCompanyInfo = {
   logoUrl?: string
 } | null
 
+/** Prefer branch address/phone on receipts when a branch is known. */
+export const receiptCompanyInfo = (
+  company: { name?: string; location?: string; phone?: string; logoUrl?: string } | null | undefined,
+  branch?: { location?: string; phone?: string } | null,
+): ReceiptCompanyInfo => {
+  if (!company && !branch) return null
+  const location = branch?.location?.trim() || company?.location
+  const phone = branch?.phone || company?.phone
+  return {
+    name: company?.name,
+    logoUrl: company?.logoUrl,
+    ...(location ? { location } : {}),
+    ...(phone ? { phone } : {}),
+  }
+}
+
 const formatDate = (ts: number) =>
   new Date(ts).toLocaleString(undefined, {
     dateStyle: 'medium',
@@ -160,9 +176,10 @@ const appendBlockLines = (
       return
     case 'lineItems':
       for (const it of order.items) {
-        lines.push(
-          padLine(`${it.quantity} x ${it.itemName}`, formatMoney(it.lineTotal)),
-        )
+        const name = it.variantName
+          ? `${it.itemName} (${it.variantName})`
+          : it.itemName
+        lines.push(padLine(`${it.quantity} x ${name}`, formatMoney(it.lineTotal)))
         for (const m of it.modifiers ?? []) {
           const adj =
             m.priceAdjustment !== 0

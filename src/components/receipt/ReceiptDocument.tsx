@@ -191,6 +191,7 @@ const ReceiptDocument = ({
                       <td className="py-1">
                         <div className="font-semibold">
                           {it.quantity} x {it.itemName}
+                          {it.variantName ? ` (${it.variantName})` : ''}
                         </div>
                         {(it.modifiers?.length ?? 0) > 0 && (
                           <ul className="pl-3 text-[11px] text-slate-600">
@@ -394,6 +395,7 @@ export const SAMPLE_RECEIPT_ORDER: Order = {
   orderNumber: 1,
   orderDate: '2026-10-24',
   companyId: 'preview',
+  branchId: 'preview-branch',
   items: [
     {
       lineId: '1',

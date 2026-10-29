@@ -4,6 +4,7 @@ import CachedImage from '@/components/common/CachedImage'
 import VirtualKeyboard from '@/components/common/VirtualKeyboard'
 import { formatMoney } from '@/utils/currency'
 import { calcLineUnit } from '@/utils/orderCalc'
+import { sortedVariants } from '@/utils/variants'
 
 interface Props {
   item: MenuItem
@@ -13,27 +14,42 @@ interface Props {
     quantity: number
     modifiers: CartModifierSelection[]
     note?: string
+    variantId?: string
+    variantName?: string
+    basePrice: number
   }) => void
 }
 
 type Selection = Record<string, string[]>
 
 const ItemModifierModal = ({ item, groups, onCancel, onConfirm }: Props) => {
+  const variants = useMemo(() => sortedVariants(item.variants), [item.variants])
+  const requiresVariant = variants.length > 0
+
   const itemGroups = useMemo(
     () => groups.filter((g) => item.modifierGroupIds?.includes(g.id)),
     [groups, item.modifierGroupIds],
   )
 
+  const [variantId, setVariantId] = useState<string | null>(null)
   const [selection, setSelection] = useState<Selection>({})
   const [quantity, setQuantity] = useState(1)
   const [note, setNote] = useState('')
   const [noteKeyboardOpen, setNoteKeyboardOpen] = useState(false)
 
   useEffect(() => {
+    setVariantId(null)
     const init: Selection = {}
     for (const g of itemGroups) init[g.id] = []
     setSelection(init)
-  }, [itemGroups])
+  }, [item.id, itemGroups])
+
+  const selectedVariant = useMemo(
+    () => (variantId ? variants.find((v) => v.id === variantId) : undefined),
+    [variantId, variants],
+  )
+
+  const lineBasePrice = selectedVariant ? selectedVariant.price : item.basePrice
 
   const toggle = (group: ModifierGroup, optionId: string) => {
     setSelection((prev) => {
@@ -67,14 +83,16 @@ const ItemModifierModal = ({ item, groups, onCancel, onConfirm }: Props) => {
     return list
   }, [itemGroups, selection])
 
-  const unit = calcLineUnit(item.basePrice, flatMods)
+  // Combined preview = parent base + each selected option; matches split cart lines on confirm.
+  const unit = calcLineUnit(lineBasePrice, flatMods)
   const total = unit * quantity
 
-  const canConfirm = itemGroups.every((g) => {
+  const modsOk = itemGroups.every((g) => {
     if (!g.required) return true
     const c = selection[g.id]?.length || 0
     return c >= g.min && c <= g.max
   })
+  const canConfirm = (!requiresVariant || !!selectedVariant) && modsOk
 
   const handleConfirm = () => {
     if (!canConfirm) return
@@ -82,6 +100,10 @@ const ItemModifierModal = ({ item, groups, onCancel, onConfirm }: Props) => {
       quantity,
       modifiers: flatMods,
       note: note.trim() || undefined,
+      basePrice: lineBasePrice,
+      ...(selectedVariant
+        ? { variantId: selectedVariant.id, variantName: selectedVariant.name }
+        : {}),
     })
   }
 
@@ -99,7 +121,13 @@ const ItemModifierModal = ({ item, groups, onCancel, onConfirm }: Props) => {
             )}
             <div>
               <h3 className="font-semibold">{item.name}</h3>
-              <p className="text-xs text-slate-500">Base {formatMoney(item.basePrice)}</p>
+              <p className="text-xs text-slate-500">
+                {requiresVariant
+                  ? selectedVariant
+                    ? formatMoney(selectedVariant.price)
+                    : `from ${formatMoney(item.basePrice)}`
+                  : `Base ${formatMoney(item.basePrice)}`}
+              </p>
             </div>
           </div>
           <button onClick={onCancel} className="btn-ghost p-2" aria-label="Close">
@@ -110,8 +138,50 @@ const ItemModifierModal = ({ item, groups, onCancel, onConfirm }: Props) => {
         </div>
 
         <div className="flex-1 space-y-5 overflow-y-auto p-4">
-          {itemGroups.length === 0 ? (
-            <p className="text-sm text-slate-500">No modifiers for this item.</p>
+          {requiresVariant && (
+            <div>
+              <div className="mb-2 flex items-center justify-between">
+                <div>
+                  <p className="text-sm font-semibold">
+                    Size / Variant{' '}
+                    <span className="text-xs font-normal text-red-600">required</span>
+                  </p>
+                  <p className="text-xs text-slate-400">Choose one</p>
+                </div>
+                {!selectedVariant && (
+                  <span className="text-xs text-red-600">Please choose a size</span>
+                )}
+              </div>
+              <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                {variants.map((v) => {
+                  const active = variantId === v.id
+                  return (
+                    <button
+                      key={v.id}
+                      type="button"
+                      onClick={() => {
+                        setNoteKeyboardOpen(false)
+                        setVariantId(v.id)
+                      }}
+                      className={
+                        active
+                          ? 'flex items-center justify-between rounded-lg border-2 border-brand-600 bg-brand-50 px-3 py-2 text-sm'
+                          : 'flex items-center justify-between rounded-lg border border-slate-200 px-3 py-2 text-sm hover:border-slate-300'
+                      }
+                    >
+                      <span className="font-medium">{v.name}</span>
+                      <span className="text-xs font-semibold text-slate-700">
+                        {formatMoney(v.price)}
+                      </span>
+                    </button>
+                  )
+                })}
+              </div>
+            </div>
+          )}
+
+          {itemGroups.length === 0 && !requiresVariant ? (
+            <p className="text-sm text-slate-500">No options for this item.</p>
           ) : (
             itemGroups.map((g) => {
               const options = g.options ? Object.values(g.options) : []

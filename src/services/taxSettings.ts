@@ -1,33 +1,41 @@
-import { get, onValue, ref, set } from 'firebase/database'
+import { get, onValue, ref, set, update } from 'firebase/database'
 import { db } from '@/lib/firebase'
-import type { CompanyTaxSettings, TaxComponent, TaxConditionType } from '@/types'
+import { listActiveBranchIds } from '@/services/branches'
+import type {
+  BranchWriteScope,
+  CompanyTaxSettings,
+  TaxComponent,
+  TaxConditionType,
+} from '@/types'
 import { generateId } from '@/utils/idGen'
 
-export const taxSettingsRef = (companyId: string) => ref(db, `taxSettings/${companyId}`)
+export const taxSettingsRef = (companyId: string, branchId: string) =>
+  ref(db, `taxSettings/${companyId}/${branchId}`)
 
 export const subscribeTaxSettings = (
   companyId: string,
+  branchId: string,
   cb: (settings: CompanyTaxSettings | null) => void,
 ) => {
-  return onValue(taxSettingsRef(companyId), (snap) => {
-    const val = snap.val() as Omit<CompanyTaxSettings, 'companyId'> | null
-    cb(val ? { companyId, ...val } : null)
+  return onValue(taxSettingsRef(companyId, branchId), (snap) => {
+    const val = snap.val() as Omit<CompanyTaxSettings, 'companyId' | 'branchId'> | null
+    cb(val ? { companyId, branchId, ...val } : null)
   })
 }
 
 export const getTaxSettings = async (
   companyId: string,
+  branchId: string,
 ): Promise<CompanyTaxSettings | null> => {
-  const snap = await get(taxSettingsRef(companyId))
-  const val = snap.val() as Omit<CompanyTaxSettings, 'companyId'> | null
-  return val ? { companyId, ...val } : null
+  const snap = await get(taxSettingsRef(companyId, branchId))
+  const val = snap.val() as Omit<CompanyTaxSettings, 'companyId' | 'branchId'> | null
+  return val ? { companyId, branchId, ...val } : null
 }
 
-export const saveTaxSettings = async (
-  companyId: string,
+const buildTaxPayload = (
   components: TaxComponent[],
   updatedBy: string,
-): Promise<void> => {
+): Omit<CompanyTaxSettings, 'companyId' | 'branchId'> => {
   const map: Record<string, TaxComponent> = {}
   components.forEach((c, i) => {
     const id = c.id || generateId('tax')
@@ -43,12 +51,33 @@ export const saveTaxSettings = async (
         : {}),
     }
   })
-  const payload: Omit<CompanyTaxSettings, 'companyId'> = {
+  return {
     components: map,
     updatedAt: Date.now(),
     updatedBy,
   }
-  await set(taxSettingsRef(companyId), payload)
+}
+
+export const saveTaxSettings = async (
+  companyId: string,
+  branchId: string,
+  components: TaxComponent[],
+  updatedBy: string,
+  scope: BranchWriteScope = 'this',
+): Promise<void> => {
+  const payload = buildTaxPayload(components, updatedBy)
+  if (scope === 'this') {
+    await set(taxSettingsRef(companyId, branchId), payload)
+    return
+  }
+  const targets = await listActiveBranchIds(companyId)
+  const updates: Record<string, unknown> = {}
+  for (const bid of targets) {
+    updates[`taxSettings/${companyId}/${bid}`] = {
+      ...payload,
+    }
+  }
+  await update(ref(db), updates)
 }
 
 export interface TaxPreset {

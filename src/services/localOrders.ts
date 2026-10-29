@@ -7,15 +7,21 @@ import {
 import {
   getCounterMeta,
   getOutboxOrder,
+  getOutboxRow,
   getTaxCache,
   isLocalOrderId,
   listUnsyncedOutbox,
   localDb,
+  putOutboxOrder,
   setCounterMeta,
+  withLocalDb,
 } from '@/localdb/db'
 import { isBrowserOnline } from '@/hooks/useOnlineStatus'
 import { generateId } from '@/utils/idGen'
-import { businessDateUtc } from '@/utils/businessDate'
+import {
+  requireCachedOpenDayState,
+  requireOpenDayState,
+} from '@/services/dayState'
 import {
   calcChange,
   calcDiscountAmount,
@@ -25,30 +31,56 @@ import {
   calcTotal,
   resolveTaxComponents,
 } from '@/utils/orderCalc'
-import type { Order, TaxComponent } from '@/types'
+import type { DayState, Order, TaxComponent } from '@/types'
 
-const nextProvisionalNumber = async (companyId: string, orderDate: string) => {
-  const lastKnown = await getCounterMeta(companyId, orderDate)
-  const pending = await localDb.orderOutbox
-    .where('companyId')
-    .equals(companyId)
-    .filter(
-      (r) =>
-        r.syncStatus !== 'synced' &&
-        (r.order.orderDate || businessDateUtc()) === orderDate,
-    )
-    .count()
+const resolveOfflineDayState = async (
+  companyId: string,
+  branchId: string,
+): Promise<DayState> => {
+  if (isBrowserOnline()) {
+    try {
+      return await requireOpenDayState(companyId, branchId)
+    } catch {
+      // fall through to cache only — never invent a new period offline
+    }
+  }
+  return requireCachedOpenDayState(companyId, branchId)
+}
+
+const nextProvisionalNumber = async (
+  companyId: string,
+  branchId: string,
+  periodId: string,
+) => {
+  const lastKnown = await getCounterMeta(companyId, branchId, periodId)
+  const pending =
+    (await withLocalDb(() =>
+      localDb.orderOutbox
+        .where('branchId')
+        .equals(branchId)
+        .filter(
+          (r) =>
+            r.companyId === companyId &&
+            r.syncStatus !== 'synced' &&
+            (r.order.reportPeriodId || '') === periodId,
+        )
+        .count(),
+    )) ?? 0
   return lastKnown + pending + 1
 }
 
-const loadCachedTaxComponents = async (companyId: string): Promise<TaxComponent[]> => {
-  const cached = await getTaxCache(companyId)
+const loadCachedTaxComponents = async (
+  companyId: string,
+  branchId: string,
+): Promise<TaxComponent[]> => {
+  const cached = await getTaxCache(companyId, branchId)
   return resolveTaxComponents(cached?.settings?.components, cached?.legacyTaxRate)
 }
 
 const buildOfflineOrder = async (input: CreateOrderInput): Promise<Order> => {
   const {
     companyId,
+    branchId,
     createdBy,
     createdByName,
     lines,
@@ -60,20 +92,26 @@ const buildOfflineOrder = async (input: CreateOrderInput): Promise<Order> => {
   const subtotal = calcSubtotal(lines)
   const discountAmount = calcDiscountAmount(subtotal, discount.type, discount.value)
   const taxableBase = calcTaxableBase(subtotal, discountAmount)
-  const components = await loadCachedTaxComponents(companyId)
+  const components = await loadCachedTaxComponents(companyId, branchId)
   const { tax, taxLines } = calcTax(taxableBase, components)
   const total = calcTotal(taxableBase, tax)
   const change = calcChange(cashReceived, total)
-  const orderDate = businessDateUtc()
-  const orderNumber = await nextProvisionalNumber(companyId, orderDate)
+  const dayState = await resolveOfflineDayState(companyId, branchId)
+  const orderNumber = await nextProvisionalNumber(
+    companyId,
+    branchId,
+    dayState.periodId,
+  )
   const localId = generateId('local')
   const now = Date.now()
 
   const order: Order = {
     id: localId,
     orderNumber,
-    orderDate,
+    orderDate: dayState.businessDate,
+    reportPeriodId: dayState.periodId,
     companyId,
+    branchId,
     items: lines.map((l) => ({
       lineId: l.lineId,
       itemId: l.itemId,
@@ -83,6 +121,9 @@ const buildOfflineOrder = async (input: CreateOrderInput): Promise<Order> => {
       modifiers: l.modifiers,
       unitPrice: l.unitPrice,
       lineTotal: l.lineTotal,
+      ...(l.categoryId ? { categoryId: l.categoryId } : {}),
+      ...(l.variantId ? { variantId: l.variantId } : {}),
+      ...(l.variantName ? { variantName: l.variantName } : {}),
       ...(l.note ? { note: l.note } : {}),
     })),
     subtotal,
@@ -115,9 +156,10 @@ const buildOfflineOrder = async (input: CreateOrderInput): Promise<Order> => {
     ...(tableNumber ? { tableNumber } : {}),
   }
 
-  await localDb.orderOutbox.put({
+  await putOutboxOrder({
     localId,
     companyId,
+    branchId,
     order,
     syncStatus: 'pending',
     clientCreatedAt: now,
@@ -129,7 +171,7 @@ const buildOfflineOrder = async (input: CreateOrderInput): Promise<Order> => {
 const updateOfflineOutboxOrder = async (
   input: UpdateCashOrderInput,
 ): Promise<Order> => {
-  const row = await localDb.orderOutbox.get(input.orderId)
+  const row = await getOutboxRow(input.orderId)
   if (!row || row.syncStatus === 'synced') {
     throw new Error('Local order not found or already synced')
   }
@@ -148,7 +190,7 @@ const updateOfflineOutboxOrder = async (
   const subtotal = calcSubtotal(lines)
   const discountAmount = calcDiscountAmount(subtotal, discount.type, discount.value)
   const taxableBase = calcTaxableBase(subtotal, discountAmount)
-  const components = await loadCachedTaxComponents(input.companyId)
+  const components = await loadCachedTaxComponents(input.companyId, input.branchId)
   const { tax, taxLines } = calcTax(taxableBase, components)
   const total = calcTotal(taxableBase, tax)
   const change = calcChange(cashReceived, total)
@@ -156,6 +198,7 @@ const updateOfflineOutboxOrder = async (
 
   const order: Order = {
     ...row.order,
+    branchId: input.branchId,
     items: lines.map((l) => ({
       lineId: l.lineId,
       itemId: l.itemId,
@@ -165,6 +208,9 @@ const updateOfflineOutboxOrder = async (
       modifiers: l.modifiers,
       unitPrice: l.unitPrice,
       lineTotal: l.lineTotal,
+      ...(l.categoryId ? { categoryId: l.categoryId } : {}),
+      ...(l.variantId ? { variantId: l.variantId } : {}),
+      ...(l.variantName ? { variantName: l.variantName } : {}),
       ...(l.note ? { note: l.note } : {}),
     })),
     subtotal,
@@ -193,8 +239,9 @@ const updateOfflineOutboxOrder = async (
     ...(tableNumber ? { tableNumber } : { tableNumber: undefined }),
   }
 
-  await localDb.orderOutbox.put({
+  await putOutboxOrder({
     ...row,
+    branchId: input.branchId,
     order,
     syncStatus:
       order.syncStatus === 'syncing' ? 'pending' : (order.syncStatus ?? 'pending'),
@@ -215,8 +262,21 @@ export const placeCashOrder = async (input: CreateOrderInput): Promise<Order> =>
       ...input,
       clientLocalId: localId,
     })
-    if (order.orderDate) {
-      await setCounterMeta(order.companyId, order.orderDate, order.orderNumber)
+    // Counter cache is optional — never fail Complete & Print after a paid order.
+    if (order.reportPeriodId) {
+      void setCounterMeta(
+        order.companyId,
+        order.branchId,
+        order.reportPeriodId,
+        order.orderNumber,
+      )
+    } else if (order.orderDate) {
+      void setCounterMeta(
+        order.companyId,
+        order.branchId,
+        order.orderDate,
+        order.orderNumber,
+      )
     }
     return order
   } catch (e) {
@@ -243,6 +303,7 @@ export const placeCashOrderUpdate = async (
 
 export const resolveOrder = async (
   companyId: string,
+  branchId: string,
   orderId: string,
 ): Promise<Order | null> => {
   if (isLocalOrderId(orderId)) {
@@ -251,17 +312,23 @@ export const resolveOrder = async (
 
   const { getOrder } = await import('@/services/orders')
   try {
-    const remote = await getOrder(companyId, orderId)
+    const remote = await getOrder(companyId, branchId, orderId)
     if (remote) return remote
   } catch {
     // offline or RTDB error — try outbox by remote id
   }
 
-  const byRemote = await localDb.orderOutbox
-    .where('companyId')
-    .equals(companyId)
-    .filter((r) => r.remoteOrderId === orderId || r.localId === orderId)
-    .first()
+  const byRemote = await withLocalDb(() =>
+    localDb.orderOutbox
+      .where('branchId')
+      .equals(branchId)
+      .filter(
+        (r) =>
+          r.companyId === companyId &&
+          (r.remoteOrderId === orderId || r.localId === orderId),
+      )
+      .first(),
+  )
   if (!byRemote) return null
   return {
     ...byRemote.order,
@@ -271,8 +338,11 @@ export const resolveOrder = async (
   }
 }
 
-export const getUnsyncedOrders = async (companyId: string): Promise<Order[]> => {
-  const rows = await listUnsyncedOutbox(companyId)
+export const getUnsyncedOrders = async (
+  companyId: string,
+  branchId: string,
+): Promise<Order[]> => {
+  const rows = await listUnsyncedOutbox(companyId, branchId)
   return rows
     .map((r) => ({
       ...r.order,

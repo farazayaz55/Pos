@@ -116,6 +116,11 @@ const CustomerDisplayPage = () => {
               <p className="text-xl font-medium">
                 <span className="mr-2 tabular-nums text-slate-400">{line.quantity}×</span>
                 {line.itemName}
+                {line.variantName ? (
+                  <span className="ml-2 text-base font-normal text-slate-400">
+                    ({line.variantName})
+                  </span>
+                ) : null}
               </p>
               {line.modifiers.length > 0 && (
                 <ul className="mt-1 space-y-0.5 text-sm text-slate-400">

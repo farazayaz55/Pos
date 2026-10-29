@@ -1,9 +1,10 @@
 import toast from 'react-hot-toast'
 import { pushCompletedCashOrder } from '@/services/orders'
 import {
+  getOutboxRow,
   listPendingOutbox,
-  localDb,
   setCounterMeta,
+  updateOutboxRow,
   type OrderOutboxRow,
 } from '@/localdb/db'
 import { formatOrderNumber } from '@/utils/businessDate'
@@ -12,14 +13,14 @@ let syncing = false
 
 const syncOne = async (row: OrderOutboxRow): Promise<boolean> => {
   if (row.remoteOrderId) {
-    await localDb.orderOutbox.update(row.localId, {
+    await updateOutboxRow(row.localId, {
       syncStatus: 'synced',
       lastError: undefined,
     })
     return true
   }
 
-  await localDb.orderOutbox.update(row.localId, {
+  await updateOutboxRow(row.localId, {
     syncStatus: 'syncing',
     lastError: undefined,
   })
@@ -27,12 +28,25 @@ const syncOne = async (row: OrderOutboxRow): Promise<boolean> => {
   try {
     const remote = await pushCompletedCashOrder({
       ...row.order,
+      branchId: row.branchId || row.order.branchId,
       clientLocalId: row.localId,
     })
-    if (remote.orderDate) {
-      await setCounterMeta(remote.companyId, remote.orderDate, remote.orderNumber)
+    if (remote.reportPeriodId) {
+      void setCounterMeta(
+        remote.companyId,
+        remote.branchId,
+        remote.reportPeriodId,
+        remote.orderNumber,
+      )
+    } else if (remote.orderDate) {
+      void setCounterMeta(
+        remote.companyId,
+        remote.branchId,
+        remote.orderDate,
+        remote.orderNumber,
+      )
     }
-    await localDb.orderOutbox.update(row.localId, {
+    await updateOutboxRow(row.localId, {
       syncStatus: 'synced',
       remoteOrderId: remote.id,
       order: {
@@ -40,6 +54,7 @@ const syncOne = async (row: OrderOutboxRow): Promise<boolean> => {
         id: remote.id,
         orderNumber: remote.orderNumber,
         orderDate: remote.orderDate,
+        branchId: remote.branchId,
         clientLocalId: row.localId,
         syncStatus: 'synced',
         syncError: undefined,
@@ -49,10 +64,14 @@ const syncOne = async (row: OrderOutboxRow): Promise<boolean> => {
     return true
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'Sync failed'
-    await localDb.orderOutbox.update(row.localId, {
-      syncStatus: 'error',
-      lastError: msg,
-    })
+    try {
+      await updateOutboxRow(row.localId, {
+        syncStatus: 'error',
+        lastError: msg,
+      })
+    } catch {
+      // IndexedDB may still be down; surface the original sync error
+    }
     return false
   }
 }
@@ -61,11 +80,14 @@ const syncOne = async (row: OrderOutboxRow): Promise<boolean> => {
  * Drain pending/error outbox rows to RTDB.
  * Returns how many synced successfully.
  */
-export const syncPendingOrders = async (companyId?: string): Promise<number> => {
+export const syncPendingOrders = async (
+  companyId?: string,
+  branchId?: string,
+): Promise<number> => {
   if (syncing) return 0
   syncing = true
   try {
-    const rows = await listPendingOutbox(companyId)
+    const rows = await listPendingOutbox(companyId, branchId)
     rows.sort((a, b) => a.clientCreatedAt - b.clientCreatedAt)
     let synced = 0
     for (const row of rows) {
@@ -78,8 +100,11 @@ export const syncPendingOrders = async (companyId?: string): Promise<number> => 
   }
 }
 
-export const syncPendingOrdersWithToast = async (companyId?: string) => {
-  const synced = await syncPendingOrders(companyId)
+export const syncPendingOrdersWithToast = async (
+  companyId?: string,
+  branchId?: string,
+) => {
+  const synced = await syncPendingOrders(companyId, branchId)
   if (synced > 0) {
     toast.success(
       synced === 1 ? '1 order synced' : `${synced} orders synced`,
@@ -89,21 +114,21 @@ export const syncPendingOrdersWithToast = async (companyId?: string) => {
 }
 
 export const retryOutboxOrder = async (localId: string) => {
-  const row = await localDb.orderOutbox.get(localId)
+  const row = await getOutboxRow(localId)
   if (!row) throw new Error('Local order not found')
   if (row.syncStatus === 'synced') return
-  await localDb.orderOutbox.update(localId, {
+  await updateOutboxRow(localId, {
     syncStatus: 'pending',
     lastError: undefined,
   })
   const ok = await syncOne({ ...row, syncStatus: 'pending', lastError: undefined })
   if (ok) {
-    const updated = await localDb.orderOutbox.get(localId)
+    const updated = await getOutboxRow(localId)
     toast.success(
       `Order #${formatOrderNumber(updated?.order.orderNumber ?? row.order.orderNumber)} synced`,
     )
   } else {
-    const failed = await localDb.orderOutbox.get(localId)
+    const failed = await getOutboxRow(localId)
     throw new Error(failed?.lastError || 'Sync failed')
   }
 }

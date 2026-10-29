@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import toast from 'react-hot-toast'
 import { useCompanyContextStore } from '@/stores/companyContextStore'
 import { useCompany } from '@/hooks/useCompany'
+import { useBranches } from '@/hooks/useBranches'
 import { subscribeCompanyTeam } from '@/services/team'
 import {
   createTeamMember,
@@ -13,6 +14,7 @@ import {
   PERMISSION_LABELS,
   STAFF_PERMISSIONS,
   defaultStaffPermissions,
+  normalizePermissions,
 } from '@/utils/permissions'
 import LoadingScreen from '@/components/common/LoadingScreen'
 import ConfirmDialog from '@/components/common/ConfirmDialog'
@@ -23,14 +25,16 @@ interface MemberDraft {
   name: string
   email: string
   password: string
+  branchId: string
   permissions: StaffPermissions
   active: boolean
 }
 
-const emptyDraft = (): MemberDraft => ({
+const emptyDraft = (branchId: string): MemberDraft => ({
   name: '',
   email: '',
   password: '',
+  branchId,
   permissions: defaultStaffPermissions(),
   active: true,
 })
@@ -44,7 +48,9 @@ const permissionSummary = (m: TeamMember) => {
 
 const TeamPage = () => {
   const companyId = useCompanyContextStore((s) => s.activeCompanyId) || ''
+  const activeBranchId = useCompanyContextStore((s) => s.activeBranchId) || ''
   const { company } = useCompany(companyId || undefined)
+  const { branches } = useBranches(companyId || undefined)
   const [members, setMembers] = useState<TeamMember[]>([])
   const [loading, setLoading] = useState(true)
   const [editing, setEditing] = useState<MemberDraft | null>(null)
@@ -79,7 +85,11 @@ const TeamPage = () => {
     return [owner, ...members]
   })()
 
-  const startCreate = () => setEditing(emptyDraft())
+  const startCreate = () => {
+    const defaultBranch =
+      activeBranchId || branches.find((b) => b.active !== false)?.id || branches[0]?.id || ''
+    setEditing(emptyDraft(defaultBranch))
+  }
 
   const startEdit = (m: TeamMember) => {
     if (m.role === 'admin') return
@@ -88,14 +98,8 @@ const TeamPage = () => {
       name: m.name,
       email: m.email,
       password: '',
-      permissions: {
-        pos: !!m.permissions?.pos,
-        menu: !!m.permissions?.menu,
-        orders: !!m.permissions?.orders,
-        settings: !!m.permissions?.settings,
-        receipt: !!m.permissions?.receipt,
-        team: !!m.permissions?.team,
-      },
+      branchId: m.branchId || activeBranchId || '',
+      permissions: normalizePermissions(m.permissions),
       active: m.active !== false,
     })
   }
@@ -133,27 +137,40 @@ const TeamPage = () => {
       toast.error('Select at least one permission')
       return
     }
+    if (!editing.branchId.trim()) {
+      toast.error('Select a branch for this staff member')
+      return
+    }
 
     setSaving(true)
     try {
+      const permissions = normalizePermissions(editing.permissions)
       if (editing.uid) {
-        await updateTeamMember({
+        const result = await updateTeamMember({
           companyId,
           uid: editing.uid,
           name: editing.name.trim(),
-          permissions: editing.permissions,
+          branchId: editing.branchId,
+          permissions,
           active: editing.active,
           ...(editing.password ? { password: editing.password } : {}),
         })
+        if (!result.data?.ok) {
+          throw new Error('Update did not confirm. Try again.')
+        }
         toast.success('Team member updated')
       } else {
-        await createTeamMember({
+        const result = await createTeamMember({
           companyId,
+          branchId: editing.branchId,
           name: editing.name.trim(),
           email: editing.email.trim(),
           password: editing.password,
-          permissions: editing.permissions,
+          permissions,
         })
+        if (!result.data?.uid) {
+          throw new Error('Create did not confirm. Try again.')
+        }
         toast.success('Team member created')
       }
       setEditing(null)
@@ -208,6 +225,7 @@ const TeamPage = () => {
             <tr>
               <th className="px-4 py-3 font-medium">Name</th>
               <th className="px-4 py-3 font-medium">Email</th>
+              <th className="hidden px-4 py-3 font-medium md:table-cell">Branch</th>
               <th className="hidden px-4 py-3 font-medium sm:table-cell">Access</th>
               <th className="px-4 py-3 font-medium">Status</th>
               <th className="px-4 py-3 font-medium text-right">Actions</th>
@@ -216,7 +234,7 @@ const TeamPage = () => {
           <tbody>
             {displayMembers.length === 0 && (
               <tr>
-                <td colSpan={5} className="px-4 py-10 text-center text-slate-500">
+                <td colSpan={6} className="px-4 py-10 text-center text-slate-500">
                   No team members yet.
                 </td>
               </tr>
@@ -234,6 +252,13 @@ const TeamPage = () => {
                     )}
                   </td>
                   <td className="px-4 py-3 text-slate-600">{m.email}</td>
+                  <td className="hidden px-4 py-3 text-slate-600 md:table-cell">
+                    {m.role === 'admin'
+                      ? 'All branches'
+                      : branches.find((b) => b.id === m.branchId)?.name ||
+                        m.branchId ||
+                        '—'}
+                  </td>
                   <td className="hidden px-4 py-3 text-slate-600 sm:table-cell">
                     {permissionSummary(m)}
                   </td>
@@ -293,6 +318,22 @@ const TeamPage = () => {
                   onChange={(e) => setEditing({ ...editing, name: e.target.value })}
                   disabled={saving}
                 />
+              </label>
+              <label className="block">
+                <span className="mb-1 block text-xs font-medium text-slate-600">Branch *</span>
+                <select
+                  className="input w-full"
+                  value={editing.branchId}
+                  onChange={(e) => setEditing({ ...editing, branchId: e.target.value })}
+                  disabled={saving}
+                >
+                  <option value="">Select branch…</option>
+                  {branches.map((b) => (
+                    <option key={b.id} value={b.id}>
+                      {b.name}
+                    </option>
+                  ))}
+                </select>
               </label>
               {!editing.uid && (
                 <label className="block">

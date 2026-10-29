@@ -1,7 +1,10 @@
 import { useState } from 'react'
 import toast from 'react-hot-toast'
+import { useAuthStore } from '@/stores/authStore'
 import { useCompanyContextStore } from '@/stores/companyContextStore'
 import { useCompanyMenu } from '@/hooks/useCompanyMenu'
+import type { BranchWriteScope } from '@/types'
+import BranchWriteScopeToggle from '@/components/common/BranchWriteScopeToggle'
 import {
   createCategory,
   deleteCategory,
@@ -30,11 +33,15 @@ const emptyDraft = (sortOrder: number): CategoryDraft => ({
 })
 
 const CategoriesPage = () => {
+  const user = useAuthStore((s) => s.user)
   const companyId = useCompanyContextStore((s) => s.activeCompanyId) || ''
-  const { categories, loading } = useCompanyMenu(companyId)
+  const branchId = useCompanyContextStore((s) => s.activeBranchId) || ''
+  const { categories, loading } = useCompanyMenu(companyId, branchId || undefined)
+  const [writeScope, setWriteScope] = useState<BranchWriteScope>('this')
   const [editing, setEditing] = useState<CategoryDraft | null>(null)
   const [toDelete, setToDelete] = useState<Category | null>(null)
   const [saving, setSaving] = useState(false)
+  const showScopeToggle = user?.role === 'admin' || user?.role === 'super_admin'
 
   const startCreate = () =>
     setEditing(emptyDraft(categories.length ? Math.max(...categories.map((c) => c.sortOrder)) + 1 : 0))
@@ -49,7 +56,7 @@ const CategoriesPage = () => {
     })
 
   const onSave = async () => {
-    if (!editing || !companyId) return
+    if (!editing || !companyId || !branchId) return
     if (!editing.name.trim()) {
       toast.error('Name is required')
       return
@@ -62,20 +69,31 @@ const CategoriesPage = () => {
         if (imageUrl) void ensureImageCached(imageUrl, companyId, { force: true })
       }
       if (editing.id) {
-        await updateCategory(companyId, editing.id, {
-          name: editing.name.trim(),
-          sortOrder: editing.sortOrder,
-          active: editing.active,
-          ...(imageUrl ? { imageUrl } : {}),
-        })
+        await updateCategory(
+          companyId,
+          branchId,
+          editing.id,
+          {
+            name: editing.name.trim(),
+            sortOrder: editing.sortOrder,
+            active: editing.active,
+            ...(imageUrl ? { imageUrl } : {}),
+          },
+          writeScope,
+        )
         toast.success('Category updated')
       } else {
-        await createCategory(companyId, {
-          name: editing.name.trim(),
-          sortOrder: editing.sortOrder,
-          active: editing.active,
-          imageUrl,
-        })
+        await createCategory(
+          companyId,
+          branchId,
+          {
+            name: editing.name.trim(),
+            sortOrder: editing.sortOrder,
+            active: editing.active,
+            imageUrl,
+          },
+          writeScope,
+        )
         toast.success('Category created')
       }
       setEditing(null)
@@ -87,10 +105,10 @@ const CategoriesPage = () => {
   }
 
   const onDelete = async () => {
-    if (!toDelete || !companyId) return
+    if (!toDelete || !companyId || !branchId) return
     setSaving(true)
     try {
-      await deleteCategory(companyId, toDelete.id)
+      await deleteCategory(companyId, branchId, toDelete.id, writeScope)
       toast.success('Category deleted')
       setToDelete(null)
     } catch (e) {
@@ -104,14 +122,23 @@ const CategoriesPage = () => {
 
   return (
     <div className="p-6">
-      <div className="mb-6 flex items-center justify-between">
+      <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="text-2xl font-bold text-slate-900">Categories</h1>
           <p className="text-sm text-slate-500">Group items into menu categories.</p>
         </div>
-        <button onClick={startCreate} className="btn-primary">
-          + New Category
-        </button>
+        <div className="flex flex-wrap items-center gap-3">
+          {showScopeToggle && (
+            <BranchWriteScopeToggle
+              value={writeScope}
+              onChange={setWriteScope}
+              disabled={saving}
+            />
+          )}
+          <button onClick={startCreate} className="btn-primary">
+            + New Category
+          </button>
+        </div>
       </div>
 
       {categories.length === 0 ? (

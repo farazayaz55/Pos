@@ -345,6 +345,7 @@ type CustomerDisplayState = {
   lines: {
     lineId: string
     itemName: string
+    variantName?: string
     quantity: number
     lineTotal: number
     modifiers: { optionName: string; priceAdjustment: number }[]
@@ -637,8 +638,11 @@ const registerIpc = () => {
     },
   )
 
-  ipcMain.handle('pos:open-display', async (_event, companyId: string) => {
+  ipcMain.handle(
+    'pos:open-display',
+    async (_event, companyId: string, branchId: string) => {
     if (!companyId || typeof companyId !== 'string') return
+    if (!branchId || typeof branchId !== 'string') return
 
     const displayWin = new BrowserWindow({
       width: 1280,
@@ -653,12 +657,14 @@ const registerIpc = () => {
     })
 
     if (isDev) {
-      await displayWin.loadURL(`http://localhost:5174/display/${companyId}`)
+      await displayWin.loadURL(
+        `http://localhost:5174/display/${companyId}/${branchId}`,
+      )
     } else {
-      // Protocol handler falls back to index.html; pathname stays /display/:id for BrowserRouter
-      await displayWin.loadURL(`${SCHEME}://./display/${companyId}`)
+      await displayWin.loadURL(`${SCHEME}://./display/${companyId}/${branchId}`)
     }
-  })
+  },
+  )
 
   ipcMain.handle('pos:get-displays', () => mapDisplays())
 

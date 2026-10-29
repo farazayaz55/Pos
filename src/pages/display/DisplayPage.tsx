@@ -2,8 +2,10 @@ import { useMemo } from 'react'
 import { useParams } from 'react-router-dom'
 import { useCompanyMenu } from '@/hooks/useCompanyMenu'
 import { useCompany } from '@/hooks/useCompany'
+import { useBranches } from '@/hooks/useBranches'
 import LoadingScreen from '@/components/common/LoadingScreen'
 import CachedImage from '@/components/common/CachedImage'
+import { itemHasVariants } from '@/utils/variants'
 
 const formatPriceCompact = (value: number): string => {
   if (!Number.isFinite(value)) return '0'
@@ -11,9 +13,12 @@ const formatPriceCompact = (value: number): string => {
 }
 
 const DisplayPage = () => {
-  const { companyId = '' } = useParams()
+  const { companyId = '', branchId = '' } = useParams()
   const { company, loading: companyLoading } = useCompany(companyId)
-  const { categories, items, loading } = useCompanyMenu(companyId)
+  const { branches, loading: branchesLoading } = useBranches(companyId || undefined)
+  const branch = branches.find((b) => b.id === branchId) ?? null
+  const { categories, items, loading } = useCompanyMenu(companyId, branchId || undefined)
+  const displayLocation = branch?.location || company?.location
 
   const grouped = useMemo(() => {
     const activeCats = categories.filter((c) => c.active)
@@ -23,12 +28,21 @@ const DisplayPage = () => {
     }))
   }, [categories, items])
 
-  if (loading || companyLoading) return <LoadingScreen label="Loading menu..." />
+  if (loading || companyLoading || branchesLoading) {
+    return <LoadingScreen label="Loading menu..." />
+  }
+  if (!branchId) {
+    return (
+      <div className="flex min-h-screen items-center justify-center p-8 text-slate-500">
+        Branch not specified.
+      </div>
+    )
+  }
 
   return (
     <div className="min-h-screen bg-[#fdfaf3] text-slate-900">
       <main className="mx-auto max-w-5xl px-6 py-12 sm:px-10">
-        {(company?.name || company?.location || company?.logoUrl) && (
+        {(company?.name || displayLocation || company?.logoUrl) && (
           <div className="mb-6 flex flex-col items-center text-center">
             {company?.logoUrl && (
               <CachedImage
@@ -43,8 +57,8 @@ const DisplayPage = () => {
                 {company.name}
               </p>
             )}
-            {company?.location && (
-              <p className="mt-1 text-xs text-slate-400">{company.location}</p>
+            {displayLocation && (
+              <p className="mt-1 text-xs text-slate-400">{displayLocation}</p>
             )}
           </div>
         )}
@@ -104,7 +118,9 @@ const DisplayPage = () => {
                         />
                         {item.available ? (
                           <span className="whitespace-nowrap font-semibold text-slate-900">
-                            {formatPriceCompact(item.basePrice)}
+                            {itemHasVariants(item)
+                              ? `from ${formatPriceCompact(item.basePrice)}`
+                              : formatPriceCompact(item.basePrice)}
                           </span>
                         ) : (
                           <span className="whitespace-nowrap text-xs font-medium uppercase tracking-wider text-slate-400">

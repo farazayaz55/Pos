@@ -13,7 +13,8 @@ interface Props {
 
 const CartPanel = ({ onCheckout }: Props) => {
   const companyId = useCompanyContextStore((s) => s.activeCompanyId) || ''
-  const { components } = useCompanyTaxSettings(companyId)
+  const branchId = useCompanyContextStore((s) => s.activeBranchId) || ''
+  const { components } = useCompanyTaxSettings(companyId, branchId || undefined)
   const lines = useCartStore((s) => s.lines)
   const tableNumber = useCartStore((s) => s.tableNumber)
   const setTableNumber = useCartStore((s) => s.setTableNumber)
@@ -89,6 +90,9 @@ const CartPanel = ({ onCheckout }: Props) => {
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0 flex-1">
                     <p className="truncate text-sm font-semibold">{l.itemName}</p>
+                    {l.variantName && (
+                      <p className="mt-0.5 text-xs text-slate-500">{l.variantName}</p>
+                    )}
                     {l.modifiers.length > 0 && (
                       <ul className="mt-0.5 space-y-0.5">
                         {l.modifiers.map((m, idx) => (

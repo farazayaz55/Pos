@@ -17,42 +17,64 @@
         "team": {
           ".read": "auth != null && (auth.token.role == 'super_admin' || ((auth.token.role == 'admin' || auth.token.role == 'staff') && auth.token.companyId == $companyId))",
           ".write": false
+        },
+        "branches": {
+          ".read": true,
+          "$branchId": {
+            ".write": "auth != null && (auth.token.role == 'super_admin' || (auth.token.role == 'admin' && auth.token.companyId == $companyId))",
+            ".validate": "newData.hasChildren(['name', 'companyId', 'location', 'createdAt'])"
+          }
         }
       }
     },
 
     "taxSettings": {
       "$companyId": {
-        ".read": "auth != null",
-        ".write": "auth != null && (auth.token.role == 'super_admin' || (auth.token.role == 'admin' && auth.token.companyId == $companyId) || (auth.token.role == 'staff' && auth.token.companyId == $companyId && auth.token.permissions.settings == true))"
+        "$branchId": {
+          ".read": "auth != null && (auth.token.role == 'super_admin' || (auth.token.role == 'admin' && auth.token.companyId == $companyId) || (auth.token.role == 'staff' && auth.token.companyId == $companyId && (auth.token.branchId == $branchId || auth.token.branchId == null) && auth.token.permissions.settings == true))",
+          ".write": "auth != null && (auth.token.role == 'super_admin' || (auth.token.role == 'admin' && auth.token.companyId == $companyId) || (auth.token.role == 'staff' && auth.token.companyId == $companyId && auth.token.branchId == $branchId && auth.token.permissions.settings == true))"
+        }
       }
     },
 
     "receiptSettings": {
       "$companyId": {
-        ".read": "auth != null",
-        ".write": "auth != null && (auth.token.role == 'super_admin' || (auth.token.role == 'admin' && auth.token.companyId == $companyId) || (auth.token.role == 'staff' && auth.token.companyId == $companyId && auth.token.permissions.receipt == true))"
+        "$branchId": {
+          ".read": "auth != null && (auth.token.role == 'super_admin' || (auth.token.role == 'admin' && auth.token.companyId == $companyId) || (auth.token.role == 'staff' && auth.token.companyId == $companyId && (auth.token.branchId == $branchId || auth.token.branchId == null) && auth.token.permissions.receipt == true))",
+          ".write": "auth != null && (auth.token.role == 'super_admin' || (auth.token.role == 'admin' && auth.token.companyId == $companyId) || (auth.token.role == 'staff' && auth.token.companyId == $companyId && auth.token.branchId == $branchId && auth.token.permissions.receipt == true))"
+        }
+      }
+    },
+
+    "kitchenReceiptSettings": {
+      "$companyId": {
+        "$branchId": {
+          ".read": "auth != null && (auth.token.role == 'super_admin' || (auth.token.role == 'admin' && auth.token.companyId == $companyId) || (auth.token.role == 'staff' && auth.token.companyId == $companyId && (auth.token.branchId == $branchId || auth.token.branchId == null) && (auth.token.permissions.receipt == true || auth.token.permissions.pos == true)))",
+          ".write": "auth != null && (auth.token.role == 'super_admin' || (auth.token.role == 'admin' && auth.token.companyId == $companyId) || (auth.token.role == 'staff' && auth.token.companyId == $companyId && auth.token.branchId == $branchId && auth.token.permissions.receipt == true))"
+        }
       }
     },
 
     "menu": {
       "$companyId": {
-        ".read": true,
-        ".write": "auth != null && (auth.token.role == 'super_admin' || (auth.token.role == 'admin' && auth.token.companyId == $companyId) || (auth.token.role == 'staff' && auth.token.companyId == $companyId && auth.token.permissions.menu == true))",
+        "$branchId": {
+          ".read": true,
+          ".write": "auth != null && (auth.token.role == 'super_admin' || (auth.token.role == 'admin' && auth.token.companyId == $companyId) || (auth.token.role == 'staff' && auth.token.companyId == $companyId && auth.token.branchId == $branchId && auth.token.permissions.menu == true))",
 
-        "categories": {
-          "$catId": {
-            ".validate": "newData.hasChildren(['name'])"
-          }
-        },
-        "items": {
-          "$itemId": {
-            ".validate": "newData.hasChildren(['name', 'categoryId', 'basePrice'])"
-          }
-        },
-        "modifierGroups": {
-          "$groupId": {
-            ".validate": "newData.hasChildren(['name'])"
+          "categories": {
+            "$catId": {
+              ".validate": "newData.hasChildren(['name'])"
+            }
+          },
+          "items": {
+            "$itemId": {
+              ".validate": "newData.hasChildren(['name', 'categoryId', 'basePrice'])"
+            }
+          },
+          "modifierGroups": {
+            "$groupId": {
+              ".validate": "newData.hasChildren(['name'])"
+            }
           }
         }
       }
@@ -60,21 +82,57 @@
 
     "orders": {
       "$companyId": {
-        ".read": "auth != null && (auth.token.role == 'super_admin' || (auth.token.role == 'admin' && auth.token.companyId == $companyId) || (auth.token.role == 'staff' && auth.token.companyId == $companyId && (auth.token.permissions.pos == true || auth.token.permissions.orders == true)))",
-        ".write": "auth != null && (auth.token.role == 'super_admin' || (auth.token.role == 'admin' && auth.token.companyId == $companyId) || (auth.token.role == 'staff' && auth.token.companyId == $companyId && auth.token.permissions.pos == true))",
-        ".indexOn": [
-          "createdAt",
-          "status",
-          "stripePaymentIntentId",
-          "kioskIdempotencyKey"
-        ]
+        "$branchId": {
+          ".read": "auth != null && (auth.token.role == 'super_admin' || (auth.token.role == 'admin' && auth.token.companyId == $companyId) || (auth.token.role == 'staff' && auth.token.companyId == $companyId && auth.token.branchId == $branchId && (auth.token.permissions.pos == true || auth.token.permissions.orders == true || auth.token.permissions.reports == true)))",
+          ".write": "auth != null && (auth.token.role == 'super_admin' || (auth.token.role == 'admin' && auth.token.companyId == $companyId) || (auth.token.role == 'staff' && auth.token.companyId == $companyId && auth.token.branchId == $branchId && auth.token.permissions.pos == true))",
+          ".indexOn": [
+            "createdAt",
+            "status",
+            "stripePaymentIntentId",
+            "kioskIdempotencyKey",
+            "reportPeriodId"
+          ]
+        }
       }
     },
 
     "counters": {
       "$companyId": {
-        ".read": "auth != null && (auth.token.role == 'super_admin' || (auth.token.role == 'admin' && auth.token.companyId == $companyId) || (auth.token.role == 'staff' && auth.token.companyId == $companyId && (auth.token.permissions.pos == true || auth.token.permissions.orders == true)))",
-        ".write": "auth != null && (auth.token.role == 'super_admin' || (auth.token.role == 'admin' && auth.token.companyId == $companyId) || (auth.token.role == 'staff' && auth.token.companyId == $companyId && auth.token.permissions.pos == true))"
+        "$branchId": {
+          ".read": "auth != null && (auth.token.role == 'super_admin' || (auth.token.role == 'admin' && auth.token.companyId == $companyId) || (auth.token.role == 'staff' && auth.token.companyId == $companyId && auth.token.branchId == $branchId && (auth.token.permissions.pos == true || auth.token.permissions.orders == true || auth.token.permissions.reports == true)))",
+          ".write": "auth != null && (auth.token.role == 'super_admin' || (auth.token.role == 'admin' && auth.token.companyId == $companyId) || (auth.token.role == 'staff' && auth.token.companyId == $companyId && auth.token.branchId == $branchId && auth.token.permissions.pos == true))"
+        }
+      }
+    },
+
+    "dayState": {
+      "$companyId": {
+        "$branchId": {
+          ".read": "auth != null && (auth.token.role == 'super_admin' || (auth.token.role == 'admin' && auth.token.companyId == $companyId) || (auth.token.role == 'staff' && auth.token.companyId == $companyId && auth.token.branchId == $branchId && (auth.token.permissions.pos == true || auth.token.permissions.orders == true || auth.token.permissions.reports == true)))",
+          ".write": "auth != null && (auth.token.role == 'super_admin' || (auth.token.role == 'admin' && auth.token.companyId == $companyId) || (auth.token.role == 'staff' && auth.token.companyId == $companyId && auth.token.branchId == $branchId && (auth.token.permissions.pos == true || auth.token.permissions.reports == true)))"
+        }
+      }
+    },
+
+    "cashMovements": {
+      "$companyId": {
+        "$branchId": {
+          "$periodId": {
+            ".read": "auth != null && (auth.token.role == 'super_admin' || (auth.token.role == 'admin' && auth.token.companyId == $companyId) || (auth.token.role == 'staff' && auth.token.companyId == $companyId && auth.token.branchId == $branchId && (auth.token.permissions.pos == true || auth.token.permissions.orders == true || auth.token.permissions.reports == true)))",
+            ".write": "auth != null && (auth.token.role == 'super_admin' || (auth.token.role == 'admin' && auth.token.companyId == $companyId) || (auth.token.role == 'staff' && auth.token.companyId == $companyId && auth.token.branchId == $branchId && auth.token.permissions.pos == true))",
+            ".indexOn": ["createdAt"]
+          }
+        }
+      }
+    },
+
+    "zReports": {
+      "$companyId": {
+        "$branchId": {
+          ".read": "auth != null && (auth.token.role == 'super_admin' || (auth.token.role == 'admin' && auth.token.companyId == $companyId) || (auth.token.role == 'staff' && auth.token.companyId == $companyId && auth.token.branchId == $branchId && (auth.token.permissions.reports == true || auth.token.permissions.orders == true || auth.token.permissions.pos == true)))",
+          ".write": false,
+          ".indexOn": ["closedAt", "businessDate"]
+        }
       }
     }
   }

@@ -27,15 +27,16 @@ import {
   calcChange,
   resolveTaxComponents,
 } from '@/utils/orderCalc'
-import { businessDateUtc } from '@/utils/businessDate'
 import { getTaxSettings } from '@/services/taxSettings'
 import { getCompany } from '@/services/companies'
+import { requireOpenDayState } from '@/services/dayState'
 
-const ordersRef = (companyId: string) => ref(db, `orders/${companyId}`)
-const orderRef = (companyId: string, orderId: string) =>
-  ref(db, `orders/${companyId}/${orderId}`)
-const dailyCounterRef = (companyId: string, orderDate: string) =>
-  ref(db, `counters/${companyId}/dailyOrderSeq/${orderDate}`)
+const ordersRef = (companyId: string, branchId: string) =>
+  ref(db, `orders/${companyId}/${branchId}`)
+const orderRef = (companyId: string, branchId: string, orderId: string) =>
+  ref(db, `orders/${companyId}/${branchId}/${orderId}`)
+const dailyCounterRef = (companyId: string, branchId: string, periodId: string) =>
+  ref(db, `counters/${companyId}/${branchId}/dailyOrderSeq/${periodId}`)
 
 const recordToArray = <T extends { id: string }>(
   val: Record<string, Omit<T, 'id'>> | null,
@@ -44,8 +45,12 @@ const recordToArray = <T extends { id: string }>(
   return Object.entries(val).map(([id, v]) => ({ id, ...v }) as T)
 }
 
-export const subscribeOrders = (companyId: string, cb: (orders: Order[]) => void) => {
-  const q = query(ordersRef(companyId), orderByChild('createdAt'))
+export const subscribeOrders = (
+  companyId: string,
+  branchId: string,
+  cb: (orders: Order[]) => void,
+) => {
+  const q = query(ordersRef(companyId, branchId), orderByChild('createdAt'))
   return onValue(q, (snap) => {
     const list = recordToArray<Order>(snap.val())
     list.sort((a, b) => b.createdAt - a.createdAt)
@@ -55,30 +60,43 @@ export const subscribeOrders = (companyId: string, cb: (orders: Order[]) => void
 
 export const subscribeOrder = (
   companyId: string,
+  branchId: string,
   orderId: string,
   cb: (o: Order | null) => void,
 ) => {
-  return onValue(orderRef(companyId, orderId), (snap) => {
+  return onValue(orderRef(companyId, branchId, orderId), (snap) => {
     const val = snap.val() as Omit<Order, 'id'> | null
     cb(val ? { id: orderId, ...val } : null)
   })
 }
 
-export const getOrder = async (companyId: string, orderId: string): Promise<Order | null> => {
-  const snap = await get(orderRef(companyId, orderId))
+export const getOrder = async (
+  companyId: string,
+  branchId: string,
+  orderId: string,
+): Promise<Order | null> => {
+  const snap = await get(orderRef(companyId, branchId, orderId))
   const val = snap.val() as Omit<Order, 'id'> | null
   return val ? { id: orderId, ...val } : null
 }
 
 const nextOrderNumber = async (
   companyId: string,
-): Promise<{ orderNumber: number; orderDate: string }> => {
-  const orderDate = businessDateUtc()
-  const result = await runTransaction(dailyCounterRef(companyId, orderDate), (current) => {
-    return (current ?? 0) + 1
-  })
+  branchId: string,
+): Promise<{ orderNumber: number; orderDate: string; reportPeriodId: string }> => {
+  const dayState = await requireOpenDayState(companyId, branchId)
+  const result = await runTransaction(
+    dailyCounterRef(companyId, branchId, dayState.periodId),
+    (current) => {
+      return (current ?? 0) + 1
+    },
+  )
   if (!result.committed) throw new Error('Failed to generate order number')
-  return { orderNumber: Number(result.snapshot.val()) || 1, orderDate }
+  return {
+    orderNumber: Number(result.snapshot.val()) || 1,
+    orderDate: dayState.businessDate,
+    reportPeriodId: dayState.periodId,
+  }
 }
 
 const linesToSnapshot = (lines: CartLine[]): OrderItemSnapshot[] =>
@@ -91,12 +109,18 @@ const linesToSnapshot = (lines: CartLine[]): OrderItemSnapshot[] =>
     modifiers: l.modifiers,
     unitPrice: l.unitPrice,
     lineTotal: l.lineTotal,
+    ...(l.categoryId ? { categoryId: l.categoryId } : {}),
+    ...(l.variantId ? { variantId: l.variantId } : {}),
+    ...(l.variantName ? { variantName: l.variantName } : {}),
     ...(l.note ? { note: l.note } : {}),
   }))
 
-const loadTaxComponents = async (companyId: string): Promise<TaxComponent[]> => {
+const loadTaxComponents = async (
+  companyId: string,
+  branchId: string,
+): Promise<TaxComponent[]> => {
   const [settings, company] = await Promise.all([
-    getTaxSettings(companyId),
+    getTaxSettings(companyId, branchId),
     getCompany(companyId),
   ])
   return resolveTaxComponents(settings?.components, company?.taxRate)
@@ -104,6 +128,7 @@ const loadTaxComponents = async (companyId: string): Promise<TaxComponent[]> => 
 
 export interface CreateOrderInput {
   companyId: string
+  branchId: string
   createdBy: string
   createdByName: string
   lines: CartLine[]
@@ -116,6 +141,7 @@ export interface CreateOrderInput {
 export const createAndCompleteOrder = async (input: CreateOrderInput): Promise<Order> => {
   const {
     companyId,
+    branchId,
     createdBy,
     createdByName,
     lines,
@@ -128,20 +154,25 @@ export const createAndCompleteOrder = async (input: CreateOrderInput): Promise<O
   const subtotal = calcSubtotal(lines)
   const discountAmount = calcDiscountAmount(subtotal, discount.type, discount.value)
   const taxableBase = calcTaxableBase(subtotal, discountAmount)
-  const components = await loadTaxComponents(companyId)
+  const components = await loadTaxComponents(companyId, branchId)
   const { tax, taxLines } = calcTax(taxableBase, components)
   const total = calcTotal(taxableBase, tax)
   const change = calcChange(cashReceived, total)
-  const { orderNumber, orderDate } = await nextOrderNumber(companyId)
+  const { orderNumber, orderDate, reportPeriodId } = await nextOrderNumber(
+    companyId,
+    branchId,
+  )
 
-  const node = push(ordersRef(companyId))
+  const node = push(ordersRef(companyId, branchId))
   const orderId = node.key!
   const now = Date.now()
 
   const order: Omit<Order, 'id'> = {
     orderNumber,
     orderDate,
+    reportPeriodId,
     companyId,
+    branchId,
     items: linesToSnapshot(lines),
     subtotal,
     discount: {
@@ -181,15 +212,22 @@ export const createAndCompleteOrder = async (input: CreateOrderInput): Promise<O
  * minting a real daily order number. Strips client-only sync fields.
  */
 export const pushCompletedCashOrder = async (local: Order): Promise<Order> => {
-  const { orderNumber, orderDate } = await nextOrderNumber(local.companyId)
-  const node = push(ordersRef(local.companyId))
+  const branchId = local.branchId
+  if (!branchId) throw new Error('Order is missing branchId')
+  const { orderNumber, orderDate, reportPeriodId } = await nextOrderNumber(
+    local.companyId,
+    branchId,
+  )
+  const node = push(ordersRef(local.companyId, branchId))
   const orderId = node.key!
   const clientLocalId = local.clientLocalId || local.id
 
   const order: Omit<Order, 'id' | 'syncStatus' | 'syncError'> = {
     orderNumber,
     orderDate,
+    reportPeriodId,
     companyId: local.companyId,
+    branchId,
     items: local.items,
     subtotal: local.subtotal,
     discount: local.discount,
@@ -226,6 +264,7 @@ export const canEditCashPosOrder = (order: Order): boolean =>
 
 export interface UpdateCashOrderInput {
   companyId: string
+  branchId: string
   orderId: string
   updatedBy: string
   updatedByName: string
@@ -240,6 +279,7 @@ export const updateCompletedCashOrder = async (
 ): Promise<Order> => {
   const {
     companyId,
+    branchId,
     orderId,
     updatedBy,
     updatedByName,
@@ -249,7 +289,7 @@ export const updateCompletedCashOrder = async (
     cashReceived,
   } = input
 
-  const existing = await getOrder(companyId, orderId)
+  const existing = await getOrder(companyId, branchId, orderId)
   if (!existing) throw new Error('Order not found')
   if (!canEditCashPosOrder(existing)) {
     throw new Error('This order cannot be edited')
@@ -259,7 +299,7 @@ export const updateCompletedCashOrder = async (
   const subtotal = calcSubtotal(lines)
   const discountAmount = calcDiscountAmount(subtotal, discount.type, discount.value)
   const taxableBase = calcTaxableBase(subtotal, discountAmount)
-  const components = await loadTaxComponents(companyId)
+  const components = await loadTaxComponents(companyId, branchId)
   const { tax, taxLines } = calcTax(taxableBase, components)
   const total = calcTotal(taxableBase, tax)
   const change = calcChange(cashReceived, total)
@@ -291,7 +331,7 @@ export const updateCompletedCashOrder = async (
     tableNumber: tableNumber || null,
   }
 
-  await update(orderRef(companyId, orderId), patch)
+  await update(orderRef(companyId, branchId, orderId), patch)
 
   return {
     ...existing,
@@ -323,16 +363,18 @@ export const updateCompletedCashOrder = async (
 
 export const updateOrderStatus = async (
   companyId: string,
+  branchId: string,
   orderId: string,
   status: OrderStatus,
 ) => {
   const patch: Record<string, unknown> = { status }
   if (status === 'completed') patch.completedAt = Date.now()
-  await update(orderRef(companyId, orderId), patch)
+  await update(orderRef(companyId, branchId, orderId), patch)
 }
 
 export const completeKioskCashOrder = async (
   companyId: string,
+  branchId: string,
   orderId: string,
 ) => {
   const patch: Record<string, unknown> = {
@@ -340,5 +382,5 @@ export const completeKioskCashOrder = async (
     paymentStatus: 'paid',
     completedAt: Date.now(),
   }
-  await update(orderRef(companyId, orderId), patch)
+  await update(orderRef(companyId, branchId, orderId), patch)
 }

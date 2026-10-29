@@ -1,39 +1,93 @@
 import { useEffect, useMemo, useRef, useState, type PointerEvent } from 'react'
 import toast from 'react-hot-toast'
 import { useCompanyContextStore } from '@/stores/companyContextStore'
+import { useAuthStore } from '@/stores/authStore'
 import { useCompanyMenu } from '@/hooks/useCompanyMenu'
+import { useCompany } from '@/hooks/useCompany'
+import { useBranches } from '@/hooks/useBranches'
+import { useOrders } from '@/hooks/useOrders'
+import { useDayState } from '@/hooks/useDayState'
 import { usePosKioskMode } from '@/hooks/usePosKioskMode'
 import { useCustomerDisplaySync } from '@/hooks/useCustomerDisplaySync'
 import { useCartStore } from '@/stores/cartStore'
-import type { MenuItem } from '@/types'
+import type { CashMovementType, MenuItem } from '@/types'
 import LoadingScreen from '@/components/common/LoadingScreen'
 import CachedImage from '@/components/common/CachedImage'
 import { formatMoney } from '@/utils/currency'
+import { itemHasVariants } from '@/utils/variants'
+import { buildXzReportSummary, filterOrdersForPeriod } from '@/utils/xzReport'
+import { receiptCompanyInfo } from '@/utils/receiptText'
+import { DAY_NOT_OPEN_MESSAGE } from '@/services/dayState'
 import ItemModifierModal from '@/components/pos/ItemModifierModal'
 import CartPanel from '@/components/pos/CartPanel'
 import CheckoutModal from './CheckoutModal'
+import OpenFloatModal from './OpenFloatModal'
+import CashMovementModal from './CashMovementModal'
+import CloseShiftModal from './CloseShiftModal'
+import XReportModal from './XReportModal'
 
 const HOLD_EXIT_MS = 3000
 
 const PosPage = () => {
   const companyId = useCompanyContextStore((s) => s.activeCompanyId) || ''
+  const branchId = useCompanyContextStore((s) => s.activeBranchId) || ''
+  const user = useAuthStore((s) => s.user)
+  const { company } = useCompany(companyId || undefined)
+  const { branches } = useBranches(companyId || undefined)
+  const branch = useMemo(
+    () => branches.find((b) => b.id === branchId) ?? null,
+    [branches, branchId],
+  )
   const { categories, items, modifierGroups, loading, fromCache } =
-    useCompanyMenu(companyId)
+    useCompanyMenu(companyId, branchId || undefined)
+  const { orders } = useOrders(companyId || undefined, branchId || undefined)
+  const { dayState, movements, loading: dayLoading, isOpen } = useDayState(
+    companyId || undefined,
+    branchId || undefined,
+  )
   const setCartCompany = useCartStore((s) => s.setCompanyId)
+  const setCartBranch = useCartStore((s) => s.setBranchId)
   const addLine = useCartStore((s) => s.addLine)
+  const addItemWithSplitModifiers = useCartStore((s) => s.addItemWithSplitModifiers)
   const { active: kioskActive, supported: kioskSupported, desired, enter, exit } =
     usePosKioskMode()
-  useCustomerDisplaySync(companyId)
+  useCustomerDisplaySync(companyId, branchId || undefined)
 
   const [activeCat, setActiveCat] = useState<string>('all')
   const [search, setSearch] = useState('')
   const [pickFor, setPickFor] = useState<MenuItem | null>(null)
   const [checkoutOpen, setCheckoutOpen] = useState(false)
   const [mobileCartOpen, setMobileCartOpen] = useState(false)
+  const [movementType, setMovementType] = useState<CashMovementType | null>(null)
+  const [xReportOpen, setXReportOpen] = useState(false)
+  const [closeOpen, setCloseOpen] = useState(false)
+
+  const periodOrders = useMemo(
+    () => filterOrdersForPeriod(orders, dayState),
+    [orders, dayState],
+  )
+  const xzSummary = useMemo(
+    () =>
+      buildXzReportSummary(periodOrders, {
+        openingFloat: dayState?.openingFloat ?? 0,
+        movements,
+      }),
+    [periodOrders, dayState?.openingFloat, movements],
+  )
+  const companyInfo = receiptCompanyInfo(company, branch)
+
+  const requestCheckout = () => {
+    if (!isOpen) {
+      toast.error(DAY_NOT_OPEN_MESSAGE)
+      return
+    }
+    setCheckoutOpen(true)
+  }
 
   useEffect(() => {
     setCartCompany(companyId || null)
-  }, [companyId, setCartCompany])
+    setCartBranch(branchId || null)
+  }, [companyId, branchId, setCartCompany, setCartBranch])
 
   const visibleCategories = useMemo(
     () => categories.filter((c) => c.active),
@@ -49,10 +103,12 @@ const PosPage = () => {
   const handleSelectItem = (item: MenuItem) => {
     if (!item.available) return
     const groups = modifierGroups.filter((g) => item.modifierGroupIds?.includes(g.id))
-    if (groups.length === 0) {
+    const needsPick = itemHasVariants(item) || groups.length > 0
+    if (!needsPick) {
       addLine({
         itemId: item.id,
         itemName: item.name,
+        categoryId: item.categoryId,
         basePrice: item.basePrice,
         imageUrl: item.imageUrl,
         quantity: 1,
@@ -73,7 +129,8 @@ const PosPage = () => {
     }
   }
 
-  if (loading) return <LoadingScreen label="Loading menu..." />
+  if (!branchId) return <LoadingScreen label="Loading branch..." />
+  if (loading || dayLoading) return <LoadingScreen label="Loading menu..." />
 
   if (items.length === 0 && categories.length === 0) {
     return (
@@ -90,6 +147,14 @@ const PosPage = () => {
 
   return (
     <div className="flex h-full flex-col">
+      {!isOpen && (
+        <OpenFloatModal
+          companyId={companyId}
+          branchId={branchId}
+          onOpened={() => undefined}
+        />
+      )}
+
       {kioskActive && (
         <div className="flex items-center justify-between gap-3 border-b border-slate-200 bg-slate-900 px-4 py-2 text-white">
           <p className="text-xs font-medium tracking-wide">
@@ -105,6 +170,48 @@ const PosPage = () => {
         </div>
       )}
 
+      {isOpen && dayState && (
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 bg-slate-50 px-4 py-2">
+          <div className="text-xs text-slate-700 sm:text-sm">
+            <span className="font-semibold text-slate-900">Shift open</span>
+            <span className="mx-2 text-slate-300">·</span>
+            Float {formatMoney(dayState.openingFloat ?? 0)}
+            <span className="mx-2 text-slate-300">·</span>
+            Expected {formatMoney(xzSummary.expectedCash)}
+          </div>
+          <div className="flex flex-wrap gap-1.5">
+            <button
+              type="button"
+              className="btn-secondary px-2.5 py-1 text-xs"
+              onClick={() => setMovementType('pay_in')}
+            >
+              Cash in
+            </button>
+            <button
+              type="button"
+              className="btn-secondary px-2.5 py-1 text-xs"
+              onClick={() => setMovementType('pay_out')}
+            >
+              Cash out
+            </button>
+            <button
+              type="button"
+              className="btn-secondary px-2.5 py-1 text-xs"
+              onClick={() => setXReportOpen(true)}
+            >
+              X Report
+            </button>
+            <button
+              type="button"
+              className="btn-primary px-2.5 py-1 text-xs"
+              onClick={() => setCloseOpen(true)}
+            >
+              Close (Z)
+            </button>
+          </div>
+        </div>
+      )}
+
       <div className="flex min-h-0 flex-1">
         <section className="flex min-w-0 flex-1 flex-col">
           <div className="flex flex-col gap-3 border-b border-slate-200 bg-white px-4 py-3 sm:flex-row sm:items-center">
@@ -114,6 +221,7 @@ const PosPage = () => {
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               className="input sm:max-w-xs"
+              disabled={!isOpen}
             />
             <div className="flex flex-1 flex-wrap gap-2">
               <button
@@ -201,7 +309,9 @@ const PosPage = () => {
                         {item.name}
                       </p>
                       <p className="mt-1 text-sm font-bold text-brand-600">
-                        {formatMoney(item.basePrice)}
+                        {itemHasVariants(item)
+                          ? `from ${formatMoney(item.basePrice)}`
+                          : formatMoney(item.basePrice)}
                       </p>
                     </div>
                   </button>
@@ -225,7 +335,7 @@ const PosPage = () => {
         </section>
 
         <aside className="hidden w-96 border-l border-slate-200 bg-white md:flex md:flex-col">
-          <CartPanel onCheckout={() => setCheckoutOpen(true)} />
+          <CartPanel onCheckout={requestCheckout} />
         </aside>
 
         {mobileCartOpen && (
@@ -244,7 +354,7 @@ const PosPage = () => {
                 <CartPanel
                   onCheckout={() => {
                     setMobileCartOpen(false)
-                    setCheckoutOpen(true)
+                    requestCheckout()
                   }}
                 />
               </div>
@@ -258,21 +368,62 @@ const PosPage = () => {
             groups={modifierGroups}
             onCancel={() => setPickFor(null)}
             onConfirm={(data) => {
-              addLine({
+              addItemWithSplitModifiers({
                 itemId: pickFor.id,
                 itemName: pickFor.name,
-                basePrice: pickFor.basePrice,
+                categoryId: pickFor.categoryId,
+                basePrice: data.basePrice,
                 imageUrl: pickFor.imageUrl,
                 quantity: data.quantity,
                 modifiers: data.modifiers,
                 note: data.note,
+                variantId: data.variantId,
+                variantName: data.variantName,
               })
               setPickFor(null)
             }}
           />
         )}
 
-        <CheckoutModal open={checkoutOpen} onClose={() => setCheckoutOpen(false)} />
+        <CheckoutModal open={checkoutOpen && isOpen} onClose={() => setCheckoutOpen(false)} />
+
+        {movementType && (
+          <CashMovementModal
+            open
+            type={movementType}
+            companyId={companyId}
+            branchId={branchId}
+            onClose={() => setMovementType(null)}
+          />
+        )}
+
+        {isOpen && dayState && (
+          <>
+            <XReportModal
+              open={xReportOpen}
+              dayState={dayState}
+              summary={xzSummary}
+              companyInfo={companyInfo}
+              branchName={branch?.name}
+              printedByName={user?.name}
+              onClose={() => setXReportOpen(false)}
+            />
+            <CloseShiftModal
+              open={closeOpen}
+              companyId={companyId}
+              branchId={branchId}
+              dayState={dayState}
+              summary={xzSummary}
+              companyInfo={companyInfo}
+              branchName={branch?.name}
+              onClose={() => setCloseOpen(false)}
+              onClosed={() => {
+                setCloseOpen(false)
+                setXReportOpen(false)
+              }}
+            />
+          </>
+        )}
       </div>
     </div>
   )

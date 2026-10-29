@@ -1,7 +1,10 @@
 import { useMemo, useState } from 'react'
 import toast from 'react-hot-toast'
+import { useAuthStore } from '@/stores/authStore'
 import { useCompanyContextStore } from '@/stores/companyContextStore'
 import { useCompanyMenu } from '@/hooks/useCompanyMenu'
+import type { BranchWriteScope } from '@/types'
+import BranchWriteScopeToggle from '@/components/common/BranchWriteScopeToggle'
 import {
   createItem,
   deleteItem,
@@ -9,12 +12,21 @@ import {
   updateItem,
   uploadMenuImage,
 } from '@/services/menu'
-import type { MenuItem } from '@/types'
+import type { ItemVariant, MenuItem } from '@/types'
 import LoadingScreen from '@/components/common/LoadingScreen'
 import ConfirmDialog from '@/components/common/ConfirmDialog'
 import CachedImage from '@/components/common/CachedImage'
 import { ensureImageCached } from '@/localdb/imageCache'
 import { formatMoney } from '@/utils/currency'
+import { generateId } from '@/utils/idGen'
+import { itemHasVariants, lowestVariantPrice, sortedVariants } from '@/utils/variants'
+
+interface VariantDraft {
+  id: string
+  name: string
+  price: number
+  sortOrder: number
+}
 
 interface ItemDraft {
   id?: string
@@ -25,6 +37,7 @@ interface ItemDraft {
   imageUrl?: string
   imageFile?: File | null
   available: boolean
+  variants: VariantDraft[]
   modifierGroupIds: string[]
   sortOrder: number
 }
@@ -35,13 +48,34 @@ const newDraft = (categoryId: string, sortOrder: number): ItemDraft => ({
   description: '',
   basePrice: 0,
   available: true,
+  variants: [],
   modifierGroupIds: [],
   sortOrder,
 })
 
+const variantsToRecord = (list: VariantDraft[]): Record<string, ItemVariant> => {
+  const out: Record<string, ItemVariant> = {}
+  list.forEach((v, idx) => {
+    out[v.id] = {
+      id: v.id,
+      name: v.name.trim(),
+      price: Number(v.price) || 0,
+      sortOrder: v.sortOrder ?? idx,
+    }
+  })
+  return out
+}
+
 const ItemsPage = () => {
+  const user = useAuthStore((s) => s.user)
   const companyId = useCompanyContextStore((s) => s.activeCompanyId) || ''
-  const { categories, items, modifierGroups, loading } = useCompanyMenu(companyId)
+  const branchId = useCompanyContextStore((s) => s.activeBranchId) || ''
+  const { categories, items, modifierGroups, loading } = useCompanyMenu(
+    companyId,
+    branchId || undefined,
+  )
+  const [writeScope, setWriteScope] = useState<BranchWriteScope>('this')
+  const showScopeToggle = user?.role === 'admin' || user?.role === 'super_admin'
   const [activeCat, setActiveCat] = useState<string>('all')
   const [editing, setEditing] = useState<ItemDraft | null>(null)
   const [toDelete, setToDelete] = useState<MenuItem | null>(null)
@@ -74,20 +108,48 @@ const ItemsPage = () => {
       basePrice: i.basePrice,
       imageUrl: i.imageUrl,
       available: i.available,
+      variants: sortedVariants(i.variants).map((v) => ({
+        id: v.id,
+        name: v.name,
+        price: v.price,
+        sortOrder: v.sortOrder,
+      })),
       modifierGroupIds: i.modifierGroupIds || [],
       sortOrder: i.sortOrder,
     })
 
   const onSave = async () => {
-    if (!editing || !companyId) return
+    if (!editing || !companyId || !branchId) return
     if (!editing.name.trim()) {
       toast.error('Name is required')
       return
     }
-    if (editing.basePrice < 0 || Number.isNaN(editing.basePrice)) {
+
+    const cleanedVariants = editing.variants
+      .map((v, idx) => ({
+        ...v,
+        name: v.name.trim(),
+        price: Number(v.price) || 0,
+        sortOrder: idx,
+      }))
+      .filter((v) => v.name.length > 0)
+
+    for (const v of cleanedVariants) {
+      if (v.price < 0 || Number.isNaN(v.price)) {
+        toast.error(`Variant "${v.name}" needs a valid price`)
+        return
+      }
+    }
+
+    const hasVariants = cleanedVariants.length > 0
+    let basePrice = Number(editing.basePrice) || 0
+    if (hasVariants) {
+      basePrice = Math.min(...cleanedVariants.map((v) => v.price))
+    } else if (basePrice < 0 || Number.isNaN(basePrice)) {
       toast.error('Price must be a positive number')
       return
     }
+
     setSaving(true)
     try {
       let imageUrl = editing.imageUrl
@@ -95,29 +157,23 @@ const ItemsPage = () => {
         imageUrl = await uploadMenuImage(companyId, editing.imageFile, 'items')
         if (imageUrl) void ensureImageCached(imageUrl, companyId, { force: true })
       }
+      const variants = variantsToRecord(cleanedVariants)
+      const payload = {
+        categoryId: editing.categoryId,
+        name: editing.name.trim(),
+        description: editing.description.trim() || undefined,
+        basePrice,
+        available: editing.available,
+        variants,
+        modifierGroupIds: editing.modifierGroupIds,
+        sortOrder: editing.sortOrder,
+        ...(imageUrl ? { imageUrl } : {}),
+      }
       if (editing.id) {
-        await updateItem(companyId, editing.id, {
-          categoryId: editing.categoryId,
-          name: editing.name.trim(),
-          description: editing.description.trim() || undefined,
-          basePrice: editing.basePrice,
-          available: editing.available,
-          modifierGroupIds: editing.modifierGroupIds,
-          sortOrder: editing.sortOrder,
-          ...(imageUrl ? { imageUrl } : {}),
-        })
+        await updateItem(companyId, branchId, editing.id, payload, writeScope)
         toast.success('Item updated')
       } else {
-        await createItem(companyId, {
-          categoryId: editing.categoryId,
-          name: editing.name.trim(),
-          description: editing.description.trim() || undefined,
-          basePrice: editing.basePrice,
-          available: editing.available,
-          modifierGroupIds: editing.modifierGroupIds,
-          sortOrder: editing.sortOrder,
-          imageUrl,
-        })
+        await createItem(companyId, branchId, payload, writeScope)
         toast.success('Item created')
       }
       setEditing(null)
@@ -129,10 +185,10 @@ const ItemsPage = () => {
   }
 
   const onDelete = async () => {
-    if (!toDelete || !companyId) return
+    if (!toDelete || !companyId || !branchId) return
     setSaving(true)
     try {
-      await deleteItem(companyId, toDelete.id)
+      await deleteItem(companyId, branchId, toDelete.id, writeScope)
       toast.success('Item deleted')
       setToDelete(null)
     } catch (e) {
@@ -143,8 +199,15 @@ const ItemsPage = () => {
   }
 
   const onToggle = async (item: MenuItem) => {
+    if (!branchId) return
     try {
-      await toggleItemAvailability(companyId, item.id, !item.available)
+      await toggleItemAvailability(
+        companyId,
+        branchId,
+        item.id,
+        !item.available,
+        writeScope,
+      )
     } catch (e) {
       toast.error(e instanceof Error ? e.message : 'Toggle failed')
     }
@@ -154,16 +217,25 @@ const ItemsPage = () => {
 
   return (
     <div className="p-6">
-      <div className="mb-6 flex items-center justify-between">
+      <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="text-2xl font-bold text-slate-900">Items</h1>
           <p className="text-sm text-slate-500">
-            Manage menu items, pricing, modifiers, and availability.
+            Manage menu items, variants, add-ons, and availability.
           </p>
         </div>
-        <button onClick={startCreate} className="btn-primary">
-          + New Item
-        </button>
+        <div className="flex flex-wrap items-center gap-3">
+          {showScopeToggle && (
+            <BranchWriteScopeToggle
+              value={writeScope}
+              onChange={setWriteScope}
+              disabled={saving}
+            />
+          )}
+          <button onClick={startCreate} className="btn-primary">
+            + New Item
+          </button>
+        </div>
       </div>
 
       <div className="mb-4 flex flex-wrap gap-2">
@@ -203,6 +275,10 @@ const ItemsPage = () => {
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
           {visible.map((item) => {
             const cat = categories.find((c) => c.id === item.categoryId)
+            const hasVars = itemHasVariants(item)
+            const fromPrice = hasVars
+              ? lowestVariantPrice(item.variants) ?? item.basePrice
+              : item.basePrice
             return (
               <div key={item.id} className="card overflow-hidden">
                 <div className="relative flex h-32 items-center justify-center bg-slate-50">
@@ -233,7 +309,7 @@ const ItemsPage = () => {
                   <div className="flex items-start justify-between gap-2">
                     <p className="font-semibold text-slate-900">{item.name}</p>
                     <p className="text-sm font-bold text-brand-600">
-                      {formatMoney(item.basePrice)}
+                      {hasVars ? `from ${formatMoney(fromPrice)}` : formatMoney(item.basePrice)}
                     </p>
                   </div>
                   <p className="text-xs text-slate-500">{cat?.name || '—'}</p>
@@ -309,6 +385,8 @@ const ItemDrawer = ({
   onSave,
   saving,
 }: DrawerProps) => {
+  const hasVariants = draft.variants.length > 0
+
   const toggleGroup = (id: string) => {
     const exists = draft.modifierGroupIds.includes(id)
     setDraft({
@@ -317,6 +395,46 @@ const ItemDrawer = ({
         ? draft.modifierGroupIds.filter((g) => g !== id)
         : [...draft.modifierGroupIds, id],
     })
+  }
+
+  const addVariant = () => {
+    setDraft({
+      ...draft,
+      variants: [
+        ...draft.variants,
+        {
+          id: generateId('var'),
+          name: '',
+          price: draft.basePrice || 0,
+          sortOrder: draft.variants.length,
+        },
+      ],
+    })
+  }
+
+  const updateVariant = (id: string, patch: Partial<VariantDraft>) => {
+    setDraft({
+      ...draft,
+      variants: draft.variants.map((v) => (v.id === id ? { ...v, ...patch } : v)),
+    })
+  }
+
+  const removeVariant = (id: string) => {
+    setDraft({
+      ...draft,
+      variants: draft.variants.filter((v) => v.id !== id),
+    })
+  }
+
+  const moveVariant = (id: string, dir: -1 | 1) => {
+    const idx = draft.variants.findIndex((v) => v.id === id)
+    if (idx < 0) return
+    const next = idx + dir
+    if (next < 0 || next >= draft.variants.length) return
+    const copy = [...draft.variants]
+    const [row] = copy.splice(idx, 1)
+    copy.splice(next, 0, row)
+    setDraft({ ...draft, variants: copy.map((v, i) => ({ ...v, sortOrder: i })) })
   }
 
   return (
@@ -374,17 +492,29 @@ const ItemDrawer = ({
             </select>
           </div>
           <div>
-            <label className="label">Base Price *</label>
+            <label className="label">
+              {hasVariants ? 'Display price (from lowest variant)' : 'Base Price *'}
+            </label>
             <input
               type="number"
               step="0.01"
               min="0"
               className="input"
-              value={draft.basePrice}
+              value={
+                hasVariants
+                  ? Math.min(...draft.variants.map((v) => Number(v.price) || 0))
+                  : draft.basePrice
+              }
+              disabled={hasVariants}
               onChange={(e) =>
                 setDraft({ ...draft, basePrice: Number(e.target.value) || 0 })
               }
             />
+            {hasVariants && (
+              <p className="mt-1 text-xs text-slate-400">
+                Saved automatically from the cheapest variant.
+              </p>
+            )}
           </div>
           <div className="sm:col-span-2">
             <label className="label">Description</label>
@@ -419,10 +549,83 @@ const ItemDrawer = ({
           </div>
 
           <div className="sm:col-span-2">
-            <label className="label">Modifier Groups</label>
+            <div className="mb-2 flex items-center justify-between">
+              <div>
+                <label className="label mb-0">Variants (size / price)</label>
+                <p className="text-xs text-slate-500">
+                  Absolute prices per size (e.g. Small, Medium, Large). Required at POS when set.
+                </p>
+              </div>
+              <button type="button" onClick={addVariant} className="btn-secondary text-xs">
+                + Add variant
+              </button>
+            </div>
+            {draft.variants.length === 0 ? (
+              <p className="rounded-lg border border-dashed border-slate-200 px-3 py-4 text-xs text-slate-500">
+                No variants — item uses a single base price.
+              </p>
+            ) : (
+              <div className="space-y-2">
+                {draft.variants.map((v, idx) => (
+                  <div
+                    key={v.id}
+                    className="flex flex-wrap items-center gap-2 rounded-lg border border-slate-200 p-2"
+                  >
+                    <input
+                      className="input min-w-[8rem] flex-1"
+                      placeholder="Name (e.g. Medium)"
+                      value={v.name}
+                      onChange={(e) => updateVariant(v.id, { name: e.target.value })}
+                    />
+                    <input
+                      type="number"
+                      step="0.01"
+                      min="0"
+                      className="input w-28"
+                      placeholder="Price"
+                      value={v.price}
+                      onChange={(e) =>
+                        updateVariant(v.id, { price: Number(e.target.value) || 0 })
+                      }
+                    />
+                    <div className="flex gap-1">
+                      <button
+                        type="button"
+                        className="btn-ghost px-2 text-xs"
+                        disabled={idx === 0}
+                        onClick={() => moveVariant(v.id, -1)}
+                        aria-label="Move up"
+                      >
+                        ↑
+                      </button>
+                      <button
+                        type="button"
+                        className="btn-ghost px-2 text-xs"
+                        disabled={idx === draft.variants.length - 1}
+                        onClick={() => moveVariant(v.id, 1)}
+                        aria-label="Move down"
+                      >
+                        ↓
+                      </button>
+                      <button
+                        type="button"
+                        className="btn-danger px-2 text-xs"
+                        onClick={() => removeVariant(v.id)}
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div className="sm:col-span-2">
+            <label className="label">Add-ons (shared modifier groups)</label>
             {modifierGroups.length === 0 ? (
               <p className="text-xs text-slate-500">
-                No modifier groups defined. Create some in the Modifiers section.
+                No add-on groups defined. Create some in the Modifiers section.
               </p>
             ) : (
               <div className="flex flex-wrap gap-2">
