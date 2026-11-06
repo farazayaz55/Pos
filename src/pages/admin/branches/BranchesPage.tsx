@@ -21,12 +21,12 @@ interface BranchDraft {
   sourceBranchId?: string
 }
 
-const emptyCreateDraft = (sourceBranchId: string): BranchDraft => ({
+const emptyCreateDraft = (sourceBranchId?: string): BranchDraft => ({
   name: '',
   location: '',
   phone: '',
   active: true,
-  sourceBranchId,
+  ...(sourceBranchId ? { sourceBranchId } : {}),
 })
 
 const callableErrorMessage = (e: unknown, fallback: string) => {
@@ -61,11 +61,7 @@ const BranchesPage = () => {
 
   const startCreate = () => {
     const source = activeBranches[0]?.id || branches[0]?.id || ''
-    if (!source) {
-      toast.error('No branch available to copy menu from')
-      return
-    }
-    setEditing(emptyCreateDraft(source))
+    setEditing(emptyCreateDraft(source || undefined))
   }
 
   const startEdit = (b: Branch) =>
@@ -94,18 +90,28 @@ const BranchesPage = () => {
         })
         toast.success('Branch updated')
       } else {
-        if (!editing.sourceBranchId) {
+        if (branches.length > 0 && !editing.sourceBranchId) {
           toast.error('Select a source branch')
+          return
+        }
+        if (!editing.location.trim()) {
+          toast.error('Location is required')
           return
         }
         await createBranch({
           companyId,
-          sourceBranchId: editing.sourceBranchId,
+          ...(editing.sourceBranchId
+            ? { sourceBranchId: editing.sourceBranchId }
+            : {}),
           name: editing.name.trim(),
           location: editing.location.trim(),
           phone: editing.phone.trim() || undefined,
         })
-        toast.success('Branch created')
+        toast.success(
+          editing.sourceBranchId
+            ? 'Branch created'
+            : 'First branch created — add a menu to get started',
+        )
       }
       setEditing(null)
     } catch (e) {
@@ -220,7 +226,7 @@ const BranchesPage = () => {
               {editing.id ? 'Edit branch' : 'New branch'}
             </h2>
             <div className="mt-4 space-y-3">
-              {!editing.id && (
+              {!editing.id && branches.length > 0 && (
                 <label className="block">
                   <span className="mb-1 block text-xs font-medium text-slate-600">
                     Copy menu from
@@ -241,17 +247,25 @@ const BranchesPage = () => {
                   </select>
                 </label>
               )}
+              {!editing.id && branches.length === 0 && (
+                <p className="rounded-md bg-slate-50 px-3 py-2 text-xs text-slate-600">
+                  This will be the first branch. Menu starts empty — no copy needed.
+                </p>
+              )}
               <label className="block">
                 <span className="mb-1 block text-xs font-medium text-slate-600">Name *</span>
                 <input
                   className="input w-full"
+                  placeholder="e.g. Hamilton"
                   value={editing.name}
                   onChange={(e) => setEditing({ ...editing, name: e.target.value })}
                   disabled={saving}
                 />
               </label>
               <label className="block">
-                <span className="mb-1 block text-xs font-medium text-slate-600">Location</span>
+                <span className="mb-1 block text-xs font-medium text-slate-600">
+                  Location *
+                </span>
                 <input
                   className="input w-full"
                   value={editing.location}

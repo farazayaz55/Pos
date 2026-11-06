@@ -137,6 +137,8 @@ const requireCompanyManager = async (
 interface CreateCompanyAdminInput {
   companyName: string
   location: string
+  /** First branch display name (e.g. Hamilton). Falls back to location. */
+  branchName?: string
   phone?: string
   logoUrl?: string
   adminName: string
@@ -156,6 +158,7 @@ export const createCompanyAdmin = onCall<CreateCompanyAdminInput, Promise<Create
     const {
       companyName,
       location,
+      branchName,
       phone,
       logoUrl,
       adminName,
@@ -190,6 +193,8 @@ export const createCompanyAdmin = onCall<CreateCompanyAdminInput, Promise<Create
     const branchRef = db.ref(`companies/${companyId}/branches`).push()
     const branchId = branchRef.key!
     const now = Date.now()
+    const resolvedBranchName =
+      (branchName && branchName.trim()) || location.trim() || 'Main'
 
     await auth.setCustomUserClaims(userRecord.uid, {
       role: 'admin',
@@ -206,7 +211,7 @@ export const createCompanyAdmin = onCall<CreateCompanyAdminInput, Promise<Create
 
     const branch: BranchRecord = {
       companyId,
-      name: location.trim() || 'Main',
+      name: resolvedBranchName,
       location: location.trim(),
       active: true,
       createdAt: now,
@@ -669,7 +674,8 @@ export const deleteTeamMember = onCall<DeleteTeamMemberInput, Promise<{ ok: true
 
 interface CreateBranchInput {
   companyId: string
-  sourceBranchId: string
+  /** When set, copies menu/tax/receipt from this branch. Omit to create an empty first branch. */
+  sourceBranchId?: string
   name: string
   location: string
   phone?: string
@@ -690,15 +696,26 @@ export const createBranch = onCall<CreateBranchInput, Promise<CreateBranchResult
       throw new HttpsError('permission-denied', 'Company admin required to create branches.')
     }
 
-    if (!companyId || !sourceBranchId || !name?.trim() || !location?.trim()) {
+    if (!companyId || !name?.trim() || !location?.trim()) {
       throw new HttpsError('invalid-argument', 'Missing required fields.')
     }
 
-    const sourceSnap = await db
-      .ref(`companies/${companyId}/branches/${sourceBranchId}`)
-      .get()
-    if (!sourceSnap.exists()) {
-      throw new HttpsError('not-found', 'Source branch not found.')
+    const existingSnap = await db.ref(`companies/${companyId}/branches`).get()
+    const existing = existingSnap.val() as Record<string, unknown> | null
+    const existingCount = existing ? Object.keys(existing).length : 0
+
+    if (sourceBranchId) {
+      const sourceSnap = await db
+        .ref(`companies/${companyId}/branches/${sourceBranchId}`)
+        .get()
+      if (!sourceSnap.exists()) {
+        throw new HttpsError('not-found', 'Source branch not found.')
+      }
+    } else if (existingCount > 0) {
+      throw new HttpsError(
+        'invalid-argument',
+        'sourceBranchId is required when copying to a new branch.',
+      )
     }
 
     const newRef = db.ref(`companies/${companyId}/branches`).push()
@@ -719,54 +736,56 @@ export const createBranch = onCall<CreateBranchInput, Promise<CreateBranchResult
       [`companies/${companyId}/branches/${branchId}`]: branch,
     }
 
-    const [menuSnap, taxSnap, receiptSnap] = await Promise.all([
-      db.ref(`menu/${companyId}/${sourceBranchId}`).get(),
-      db.ref(`taxSettings/${companyId}/${sourceBranchId}`).get(),
-      db.ref(`receiptSettings/${companyId}/${sourceBranchId}`).get(),
-    ])
+    if (sourceBranchId) {
+      const [menuSnap, taxSnap, receiptSnap] = await Promise.all([
+        db.ref(`menu/${companyId}/${sourceBranchId}`).get(),
+        db.ref(`taxSettings/${companyId}/${sourceBranchId}`).get(),
+        db.ref(`receiptSettings/${companyId}/${sourceBranchId}`).get(),
+      ])
 
-    const menuVal = menuSnap.val() as {
-      categories?: Record<string, Record<string, unknown>>
-      items?: Record<string, Record<string, unknown>>
-      modifierGroups?: Record<string, Record<string, unknown>>
-    } | null
+      const menuVal = menuSnap.val() as {
+        categories?: Record<string, Record<string, unknown>>
+        items?: Record<string, Record<string, unknown>>
+        modifierGroups?: Record<string, Record<string, unknown>>
+      } | null
 
-    if (menuVal?.categories) {
-      for (const [id, cat] of Object.entries(menuVal.categories)) {
-        updates[`menu/${companyId}/${branchId}/categories/${id}`] = {
-          ...cat,
-          companyId,
-          branchId,
+      if (menuVal?.categories) {
+        for (const [id, cat] of Object.entries(menuVal.categories)) {
+          updates[`menu/${companyId}/${branchId}/categories/${id}`] = {
+            ...cat,
+            companyId,
+            branchId,
+          }
         }
       }
-    }
-    if (menuVal?.items) {
-      for (const [id, item] of Object.entries(menuVal.items)) {
-        updates[`menu/${companyId}/${branchId}/items/${id}`] = {
-          ...item,
-          companyId,
-          branchId,
+      if (menuVal?.items) {
+        for (const [id, item] of Object.entries(menuVal.items)) {
+          updates[`menu/${companyId}/${branchId}/items/${id}`] = {
+            ...item,
+            companyId,
+            branchId,
+          }
         }
       }
-    }
-    if (menuVal?.modifierGroups) {
-      for (const [id, g] of Object.entries(menuVal.modifierGroups)) {
-        updates[`menu/${companyId}/${branchId}/modifierGroups/${id}`] = {
-          ...g,
-          companyId,
-          branchId,
+      if (menuVal?.modifierGroups) {
+        for (const [id, g] of Object.entries(menuVal.modifierGroups)) {
+          updates[`menu/${companyId}/${branchId}/modifierGroups/${id}`] = {
+            ...g,
+            companyId,
+            branchId,
+          }
         }
       }
-    }
 
-    const taxVal = taxSnap.val()
-    if (taxVal) {
-      updates[`taxSettings/${companyId}/${branchId}`] = taxVal
-    }
+      const taxVal = taxSnap.val()
+      if (taxVal) {
+        updates[`taxSettings/${companyId}/${branchId}`] = taxVal
+      }
 
-    const receiptVal = receiptSnap.val()
-    if (receiptVal) {
-      updates[`receiptSettings/${companyId}/${branchId}`] = receiptVal
+      const receiptVal = receiptSnap.val()
+      if (receiptVal) {
+        updates[`receiptSettings/${companyId}/${branchId}`] = receiptVal
+      }
     }
 
     await db.ref().update(updates)
@@ -824,3 +843,14 @@ export {
 } from './payments'
 
 export { closeBusinessDay } from './dayClose'
+
+import {
+  runMigrateLegacyCompanyData,
+  type MigrateLegacyCompanyDataInput,
+  type MigrateLegacyCompanyDataResult,
+} from './migrateLegacy'
+
+export const migrateLegacyCompanyData = onCall<
+  MigrateLegacyCompanyDataInput,
+  Promise<MigrateLegacyCompanyDataResult>
+>(async (req) => runMigrateLegacyCompanyData(req, requireCompanyManager))

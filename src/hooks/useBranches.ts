@@ -17,7 +17,9 @@ export const useBranches = (companyId: string | undefined) => {
     }
 
     let cancelled = false
+    let unsub: (() => void) | undefined
     setLoading(true)
+    setMigrated(false)
 
     void (async () => {
       try {
@@ -25,18 +27,18 @@ export const useBranches = (companyId: string | undefined) => {
       } catch (e) {
         console.warn('[useBranches] migration failed', e)
       }
-      if (!cancelled) setMigrated(true)
-    })()
-
-    const unsub = subscribeBranches(companyId, (list) => {
       if (cancelled) return
-      setBranches(list)
-      setLoading(false)
-    })
+      setMigrated(true)
+      unsub = subscribeBranches(companyId, (list) => {
+        if (cancelled) return
+        setBranches(list)
+        setLoading(false)
+      })
+    })()
 
     return () => {
       cancelled = true
-      unsub()
+      unsub?.()
     }
   }, [companyId])
 

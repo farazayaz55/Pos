@@ -15,6 +15,7 @@ interface Props {
 const baseSchema = z.object({
   companyName: z.string().min(2, 'Company name is required'),
   location: z.string().min(2, 'Location is required'),
+  branchName: z.string().optional().or(z.literal('')),
   phone: z.string().optional().or(z.literal('')),
   adminName: z.string().min(2, 'Admin name is required'),
   adminEmail: z.string().email('Valid email required'),
@@ -28,6 +29,13 @@ type FormValues = z.infer<typeof baseSchema>
 const buildSchema = (mode: 'create' | 'edit') =>
   baseSchema
     .superRefine((v, ctx) => {
+      if (mode === 'create' && (!v.branchName || v.branchName.trim().length < 2)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['branchName'],
+          message: 'Branch name is required',
+        })
+      }
       const needPassword = mode === 'create' || !!v.password
       if (needPassword) {
         if (!v.password || v.password.length < 6) {
@@ -68,6 +76,7 @@ const CompanyFormPage = ({ mode }: Props) => {
     defaultValues: {
       companyName: '',
       location: '',
+      branchName: '',
       phone: '',
       adminName: '',
       adminEmail: '',
@@ -89,6 +98,7 @@ const CompanyFormPage = ({ mode }: Props) => {
       reset({
         companyName: c.name,
         location: c.location,
+        branchName: '',
         phone: c.phone || '',
         adminName: c.adminName,
         adminEmail: c.adminEmail,
@@ -118,6 +128,7 @@ const CompanyFormPage = ({ mode }: Props) => {
         const result = await createCompanyAdmin({
           companyName: values.companyName,
           location: values.location,
+          branchName: values.branchName?.trim() || undefined,
           phone: values.phone || undefined,
           adminName: values.adminName,
           adminEmail: values.adminEmail,
@@ -218,12 +229,28 @@ const CompanyFormPage = ({ mode }: Props) => {
             )}
           </div>
           <div>
-            <label className="label">Location *</label>
-            <input className="input" {...register('location')} />
+            <label className="label">Company Location *</label>
+            <input className="input" placeholder="City / region" {...register('location')} />
             {errors.location && (
               <p className="mt-1 text-xs text-red-600">{errors.location.message}</p>
             )}
           </div>
+          {isCreate && (
+            <div>
+              <label className="label">First Branch Name *</label>
+              <input
+                className="input"
+                placeholder="e.g. Hamilton"
+                {...register('branchName')}
+              />
+              {errors.branchName && (
+                <p className="mt-1 text-xs text-red-600">{errors.branchName.message}</p>
+              )}
+              <p className="mt-1 text-xs text-slate-400">
+                Creates the first location for this company (menu starts empty).
+              </p>
+            </div>
+          )}
           <div>
             <label className="label">Phone (optional)</label>
             <input className="input" {...register('phone')} />

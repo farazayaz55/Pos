@@ -5,6 +5,8 @@ import type { DayState, StaffPermissions, ZReport } from '@/types'
 export interface CreateCompanyAdminInput {
   companyName: string
   location: string
+  /** First branch display name (e.g. Hamilton). Falls back to location. */
+  branchName?: string
   phone?: string
   logoUrl?: string
   adminName: string
@@ -100,7 +102,8 @@ export interface UpdateTeamMemberInput {
 
 export interface CreateBranchInput {
   companyId: string
-  sourceBranchId: string
+  /** Omit when creating the first empty branch. */
+  sourceBranchId?: string
   name: string
   location: string
   phone?: string
@@ -124,6 +127,29 @@ export const deleteBranchCallable = httpsCallable<DeleteBranchInput, { ok: true 
   functions,
   'deleteBranch',
 )
+
+export interface MigrateLegacyCompanyDataInput {
+  companyId: string
+  branchId?: string
+}
+
+export interface MigrateLegacyCompanyDataResult {
+  branchId: string
+  copied: {
+    menu: boolean
+    tax: boolean
+    receipt: boolean
+    kitchenReceipt: boolean
+    counters: boolean
+    orders: number
+  }
+  menuSource: string | null
+}
+
+export const migrateLegacyCompanyData = httpsCallable<
+  MigrateLegacyCompanyDataInput,
+  MigrateLegacyCompanyDataResult
+>(functions, 'migrateLegacyCompanyData')
 
 export const updateTeamMember = httpsCallable<UpdateTeamMemberInput, { ok: true }>(
   functions,
